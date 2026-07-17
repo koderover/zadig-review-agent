@@ -1,0 +1,23 @@
+# Build artifacts
+bin/
+dist/
+*.test
+*.out
+
+# Review reports
+review-report.json
+review-report.md
+
+# Local configuration and secrets
+.zadig-review-agent/
+.env
+.env.*
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Temporary files
+tmp/
+*.tmp

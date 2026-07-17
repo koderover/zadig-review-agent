@@ -1,0 +1,23 @@
+{
+  "rules": [
+    {"path": "**/*.properties", "rule": "rule_docs/properties.md"},
+    {"path": "**/*{mapper,dao}*.xml", "rule": "rule_docs/mapper_dao_xml.md"},
+    {"path": "**/pom.xml", "rule": "rule_docs/pom_xml.md"},
+    {"path": "**/build.gradle", "rule": "rule_docs/build_gradle.md"},
+    {"path": "**/package.json", "rule": "rule_docs/package_json.md"},
+    {"path": "**/Cargo.toml", "rule": "rule_docs/cargo_toml.md"},
+    {"path": "**/*.{json,json5}", "rule": "rule_docs/json.md"},
+    {"path": ".github/workflows/**/*.{yaml,yml}", "rule": "rule_docs/github_workflows.md"},
+    {"path": ".github/**/*.{yaml,yml}", "rule": "rule_docs/github_config.md"},
+    {"path": "**/*.{yaml,yml}", "rule": "rule_docs/yaml.md"},
+    {"path": "**/*.go", "rule": "rule_docs/go.md"},
+    {"path": "**/*.java", "rule": "rule_docs/java.md"},
+    {"path": "**/*.ets", "rule": "rule_docs/arkts.md"},
+    {"path": "**/*.{ts,js,tsx,jsx}", "rule": "rule_docs/ts_js_tsx_jsx.md"},
+    {"path": "**/*.kt", "rule": "rule_docs/kotlin.md"},
+    {"path": "**/*.rs", "rule": "rule_docs/rust.md"},
+    {"path": "**/*.{cpp,cc,hpp}", "rule": "rule_docs/cpp.md"},
+    {"path": "**/*.c", "rule": "rule_docs/c.md"},
+    {"path": "**", "rule": "rule_docs/default.md"}
+  ]
+}

@@ -1,0 +1,27 @@
+review:
+  concurrency: 4
+  context_lines: 3
+  max_tool_rounds: 30
+  max_context_tool_calls: 10
+  max_chunk_tokens: 12000
+  confidence_threshold: 0.75
+  fail_on:
+    - critical
+    - high
+
+model:
+  protocol: openai
+  name: gpt-4o
+  endpoint: https://api.openai.com/v1
+  api_key: sk-...
+  timeout: 120s
+
+output:
+  # Relative report paths are saved under:
+  # ~/.zadig-review-agent/reports/<flattened-repository-path>/<review-id>/
+  json: review-report.json
+  markdown: review-report.md
+  console: detailed
+  language: zh-CN
+  # Print review phase and retry progress to stderr.
+  progress: true

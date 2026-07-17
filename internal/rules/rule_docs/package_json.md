@@ -1,0 +1,3 @@
+- Avoid newly introduced `latest` or `*` dependency versions because they make CI installs non-reproducible; do not report unchanged existing versions
+- Dependency conflicts or duplicate declarations: the same dependency exists in both `dependencies` and `devDependencies`
+- Required tool dependencies not declared: tools referenced by changed scripts are unavailable from dependencies, workspace packages, or the documented CI environment

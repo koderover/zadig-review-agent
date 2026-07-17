@@ -1,0 +1,17 @@
+{
+  "include": [
+    "src/**/*.go"
+  ],
+  "exclude": [
+    "**/*.lock",
+    "**/vendor/**",
+    "**/generated/**"
+  ],
+  "rules": [
+    {
+      "path": "**/*.go",
+      "rule": ".zadig-review/docs/go-review.md",
+      "merge_system_rule": true
+    }
+  ]
+}

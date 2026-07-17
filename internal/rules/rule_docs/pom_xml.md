@@ -1,0 +1,1 @@
+New or changed production dependency versions should not use snapshot or dynamic qualifiers because they make CI builds non-reproducible. Versions inherited from a parent POM or dependency management are valid and should not be reported.
