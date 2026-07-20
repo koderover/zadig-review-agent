@@ -13,7 +13,7 @@ import (
 	openai "github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 
-	"github.com/koderover/zadig-code-review-agent/internal/config"
+	"github.com/koderover/zadig-review-agent/internal/config"
 )
 
 func TestOpenAIProtocol(t *testing.T) {

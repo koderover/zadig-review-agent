@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/koderover/zadig-code-review-agent/internal/protocol"
+	"github.com/koderover/zadig-review-agent/internal/protocol"
 )
 
 //go:embed prompts/*.md

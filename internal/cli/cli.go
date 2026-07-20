@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -11,14 +12,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
-	"github.com/koderover/zadig-code-review-agent/internal/config"
-	"github.com/koderover/zadig-code-review-agent/internal/filter"
-	"github.com/koderover/zadig-code-review-agent/internal/gitdiff"
-	"github.com/koderover/zadig-code-review-agent/internal/protocol"
-	"github.com/koderover/zadig-code-review-agent/internal/reporter"
-	"github.com/koderover/zadig-code-review-agent/internal/reviewer"
-	"github.com/koderover/zadig-code-review-agent/internal/rules"
+	"github.com/koderover/zadig-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/config"
+	"github.com/koderover/zadig-review-agent/internal/filter"
+	"github.com/koderover/zadig-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/protocol"
+	"github.com/koderover/zadig-review-agent/internal/reporter"
+	"github.com/koderover/zadig-review-agent/internal/reviewer"
+	"github.com/koderover/zadig-review-agent/internal/rules"
+	"github.com/koderover/zadig-review-agent/internal/version"
 )
 
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
@@ -27,6 +29,12 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) (int, err
 		return agent.ExitIncomplete, fmt.Errorf("missing command")
 	}
 	switch args[0] {
+	case "version", "--version":
+		if len(args) != 1 {
+			return agent.ExitIncomplete, fmt.Errorf("version does not accept arguments")
+		}
+		fmt.Fprintln(stdout, version.String())
+		return agent.ExitOK, nil
 	case "review":
 		return runReview(ctx, args[1:], stdout, stderr)
 	case "rules":
@@ -69,6 +77,9 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	console := fs.String("console", "", "console output mode: detailed, summary, none")
 	progress := fs.Bool("progress", false, "print review progress to stderr (use --progress=false to disable)")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return agent.ExitOK, nil
+		}
 		return agent.ExitIncomplete, err
 	}
 	cfg, err := config.Load(*configPath)
@@ -184,6 +195,9 @@ func runRules(args []string, stdout, stderr io.Writer) (int, error) {
 	fs.SetOutput(stderr)
 	rulePath := fs.String("rule", "", "path to Zadig review rules JSON")
 	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return agent.ExitOK, nil
+		}
 		return agent.ExitIncomplete, err
 	}
 	if fs.NArg() != 1 {
@@ -552,6 +566,7 @@ func sanitizePathLabel(value string) string {
 
 func usage(w io.Writer) {
 	fmt.Fprintln(w, "usage:")
+	fmt.Fprintln(w, "  zadig-review-agent version | --version")
 	fmt.Fprintln(w, "  zadig-review-agent review [--from origin/main --to HEAD | --commit <sha>] [--config ~/.zadig-review-agent/config.yaml] [--rule rules.json] [--preview] [--progress]")
 	fmt.Fprintln(w, "  zadig-review-agent config set <key> <value> [--config ~/.zadig-review-agent/config.yaml]")
 	fmt.Fprintln(w, "  zadig-review-agent config get <key> [--config ~/.zadig-review-agent/config.yaml]")

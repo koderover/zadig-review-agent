@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
-	"github.com/koderover/zadig-code-review-agent/internal/gitdiff"
-	"github.com/koderover/zadig-code-review-agent/internal/rules"
+	"github.com/koderover/zadig-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/rules"
 )
 
 const (

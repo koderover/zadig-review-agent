@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/koderover/zadig-code-review-agent/internal/protocol"
+	"github.com/koderover/zadig-review-agent/internal/protocol"
 )
 
 //go:embed tools.json

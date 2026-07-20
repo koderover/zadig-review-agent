@@ -13,12 +13,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
-	"github.com/koderover/zadig-code-review-agent/internal/config"
-	"github.com/koderover/zadig-code-review-agent/internal/filter"
-	"github.com/koderover/zadig-code-review-agent/internal/gitdiff"
-	"github.com/koderover/zadig-code-review-agent/internal/protocol"
-	"github.com/koderover/zadig-code-review-agent/internal/rules"
+	"github.com/koderover/zadig-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/config"
+	"github.com/koderover/zadig-review-agent/internal/filter"
+	"github.com/koderover/zadig-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/protocol"
+	"github.com/koderover/zadig-review-agent/internal/rules"
 )
 
 type Runner struct {

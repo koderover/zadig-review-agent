@@ -10,9 +10,54 @@ import (
 	"testing"
 	"time"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
-	"github.com/koderover/zadig-code-review-agent/internal/config"
+	"github.com/koderover/zadig-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/config"
+	"github.com/koderover/zadig-review-agent/internal/version"
 )
+
+func TestVersion(t *testing.T) {
+	oldVersion, oldCommit, oldDate := version.Version, version.Commit, version.Date
+	t.Cleanup(func() {
+		version.Version, version.Commit, version.Date = oldVersion, oldCommit, oldDate
+	})
+
+	for _, args := range [][]string{{"version"}, {"--version"}} {
+		version.Version, version.Commit, version.Date = "dev", "unknown", "unknown"
+		var stdout, stderr bytes.Buffer
+		code, err := Run(context.Background(), args, &stdout, &stderr)
+		if err != nil || code != 0 {
+			t.Fatalf("args=%v code=%d err=%v stderr=%s", args, code, err, stderr.String())
+		}
+		if got, want := strings.TrimSpace(stdout.String()), "zadig-review-agent dev (commit unknown, built unknown)"; got != want {
+			t.Fatalf("args=%v got %q want %q", args, got, want)
+		}
+	}
+
+	version.Version = "v1.2.3"
+	version.Commit = "0123456789abcdef"
+	version.Date = "2026-07-20T08:00:00Z"
+	var stdout, stderr bytes.Buffer
+	code, err := Run(context.Background(), []string{"version"}, &stdout, &stderr)
+	if err != nil || code != 0 {
+		t.Fatalf("code=%d err=%v stderr=%s", code, err, stderr.String())
+	}
+	if got, want := strings.TrimSpace(stdout.String()), "zadig-review-agent v1.2.3 (commit 0123456789ab, built 2026-07-20T08:00:00Z)"; got != want {
+		t.Fatalf("got %q want %q", got, want)
+	}
+}
+
+func TestCommandHelpExitsSuccessfully(t *testing.T) {
+	for _, args := range [][]string{{"review", "--help"}, {"rules", "check", "--help"}} {
+		var stdout, stderr bytes.Buffer
+		code, err := Run(context.Background(), args, &stdout, &stderr)
+		if err != nil || code != 0 {
+			t.Fatalf("args=%v code=%d err=%v stderr=%s", args, code, err, stderr.String())
+		}
+		if stderr.Len() == 0 {
+			t.Fatalf("args=%v expected flag help output", args)
+		}
+	}
+}
 
 func TestRulesCheck(t *testing.T) {
 	dir := t.TempDir()
@@ -111,10 +156,10 @@ func TestReviewPreviewDoesNotNeedModel(t *testing.T) {
 }
 
 func TestReportRunDirUsesSecondTimestamp(t *testing.T) {
-	metadata := agent.Metadata{DiffMode: "commit", Commit: "d3ee93bda", Repository: "/Users/petrus/Project/koderover/zadig"}
+	metadata := agent.Metadata{DiffMode: "commit", Commit: "d3ee93bda", Repository: "/home/developer/projects/zadig"}
 	when := time.Date(2026, time.July, 14, 9, 1, 39, 226907000, time.UTC)
 	dir := reportRunDirAt(metadata, when)
-	want := filepath.Join(config.DefaultReportRoot(), "Users-petrus-Project-koderover-zadig", "20260714T090139Z-commit-d3ee93bda")
+	want := filepath.Join(config.DefaultReportRoot(), "home-developer-projects-zadig", "20260714T090139Z-commit-d3ee93bda")
 	if dir != want {
 		t.Fatalf("unexpected report dir: got %q want %q", dir, want)
 	}
@@ -131,15 +176,15 @@ func TestAvailableReportRunDirAvoidsCollision(t *testing.T) {
 }
 
 func TestRepositoryPathGroupingUsesFlattenedFullPath(t *testing.T) {
-	first := sanitizePathLabel(repositoryPath("/Users/petrus/Project/koderover/zadig"))
-	second := sanitizePathLabel(repositoryPath("/Users/petrus/Project/another/zadig"))
-	if first != "Users-petrus-Project-koderover-zadig" {
+	first := sanitizePathLabel(repositoryPath("/home/developer/projects/zadig"))
+	second := sanitizePathLabel(repositoryPath("/home/developer/sandbox/zadig"))
+	if first != "home-developer-projects-zadig" {
 		t.Fatalf("unexpected flattened repository path %q", first)
 	}
 	if first == second {
 		t.Fatalf("same basename repositories must use different groups: %q", first)
 	}
-	if got := sanitizePathLabel(`/Users/petrus/My Project\\nested///zadig`); got != "Users-petrus-My-Project-nested-zadig" {
+	if got := sanitizePathLabel(`/home/developer/My Project\\nested///zadig`); got != "home-developer-My-Project-nested-zadig" {
 		t.Fatalf("unexpected special-character normalization %q", got)
 	}
 }

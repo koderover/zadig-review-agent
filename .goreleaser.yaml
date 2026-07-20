@@ -1,0 +1,47 @@
+version: 2
+
+project_name: zadig-review-agent
+
+builds:
+  - id: zadig-review-agent
+    main: .
+    binary: zadig-review-agent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/koderover/zadig-review-agent/internal/version.Version={{.Version}}
+        -X github.com/koderover/zadig-review-agent/internal/version.Commit={{.Commit}}
+        -X github.com/koderover/zadig-review-agent/internal/version.Date={{.Date}}
+
+archives:
+  - formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+      - README-zh-CN.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  use: github-native
+
+release:
+  prerelease: auto

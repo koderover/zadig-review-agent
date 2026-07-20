@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
-	"github.com/koderover/zadig-code-review-agent/internal/cli"
+	"github.com/koderover/zadig-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/cli"
 )
 
 func main() {

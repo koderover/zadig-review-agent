@@ -11,9 +11,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
-	"github.com/koderover/zadig-code-review-agent/internal/filter"
-	"github.com/koderover/zadig-code-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/filter"
+	"github.com/koderover/zadig-review-agent/internal/gitdiff"
 )
 
 type toolAction struct {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/agent"
 )
 
 func Write(report agent.Report, jsonPath, markdownPath string, console io.Writer, consoleMode string) error {

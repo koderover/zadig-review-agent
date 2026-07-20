@@ -18,8 +18,8 @@ import (
 	openaioption "github.com/openai/openai-go/v3/option"
 	"google.golang.org/genai"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
-	"github.com/koderover/zadig-code-review-agent/internal/config"
+	"github.com/koderover/zadig-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/config"
 )
 
 const modelAPIKeyEnv = "ZADIG_REVIEW_MODEL_API_KEY"

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/agent"
 )
 
 func TestMarkdownIncludesFinding(t *testing.T) {

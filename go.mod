@@ -1,4 +1,4 @@
-module github.com/koderover/zadig-code-review-agent
+module github.com/koderover/zadig-review-agent
 
 go 1.24
 

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/koderover/zadig-code-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/gitdiff"
 )
 
 func TestReadOnlyToolsAndPathBoundary(t *testing.T) {

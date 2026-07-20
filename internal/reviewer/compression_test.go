@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/koderover/zadig-code-review-agent/internal/agent"
-	"github.com/koderover/zadig-code-review-agent/internal/config"
-	"github.com/koderover/zadig-code-review-agent/internal/gitdiff"
-	"github.com/koderover/zadig-code-review-agent/internal/protocol"
+	"github.com/koderover/zadig-review-agent/internal/agent"
+	"github.com/koderover/zadig-review-agent/internal/config"
+	"github.com/koderover/zadig-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/protocol"
 )
 
 func TestPartitionForCompressionPreservesRecentCompleteRounds(t *testing.T) {
