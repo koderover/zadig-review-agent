@@ -4,7 +4,7 @@
 [![CodeQL](https://github.com/koderover/zadig-review-agent/actions/workflows/codeql.yml/badge.svg)](https://github.com/koderover/zadig-review-agent/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Read-only, LLM-powered code review for local development and CI workflows.
+An LLM-powered code review agent for local development and CI workflows.
 
 English | [简体中文](README.md)
 
@@ -15,17 +15,16 @@ Zadig Review Agent reviews Git changes, asks a configured language model to iden
 Key properties:
 
 - reviews a workspace, one commit, or a ref range;
-- supports OpenAI, Gemini, and Anthropic protocols through their official Go SDKs;
+- supports OpenAI, Gemini, and Anthropic protocols;
 - applies built-in or repository-specific review rules;
 - exposes only read-only repository tools to the model;
 - returns deterministic exit codes suitable for CI quality gates;
-- never writes comments back to a forge or modifies the reviewed repository.
 
 This project is a review assistant, not a substitute for tests, security analysis, or human review. Model output can be incomplete or incorrect.
 
 ## Requirements
 
-- Go 1.24 or later when building from source
+- Go 1.25.12 or later when building from source
 - Git and a Git repository to review
 - credentials for one supported model provider (not needed for `--preview`)
 
@@ -33,20 +32,16 @@ This project is a review assistant, not a substitute for tests, security analysi
 
 ### Go install
 
-After the first tagged release is available:
-
 ```bash
 go install github.com/koderover/zadig-review-agent@latest
 ```
 
-`go install` honors the standard `GOPROXY` setting. To use a trusted organization or regional proxy for one installation:
+`go install` honors the standard `GOPROXY` setting. To use a trusted proxy for one installation:
 
 ```bash
-GOPROXY=https://your-go-proxy.example,direct \
+GOPROXY=https://goproxy.cn,direct \
   go install github.com/koderover/zadig-review-agent@latest
 ```
-
-Use an explicit version such as `@v0.1.0` when reproducible installation is more important than tracking the latest release.
 
 ### Release archive
 

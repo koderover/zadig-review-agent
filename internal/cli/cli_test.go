@@ -33,6 +33,18 @@ func TestVersion(t *testing.T) {
 		}
 	}
 
+	version.Version, version.Commit, version.Date = "v0.1.0", "unknown", "unknown"
+	{
+		var stdout, stderr bytes.Buffer
+		code, err := Run(context.Background(), []string{"version"}, &stdout, &stderr)
+		if err != nil || code != 0 {
+			t.Fatalf("code=%d err=%v stderr=%s", code, err, stderr.String())
+		}
+		if got, want := strings.TrimSpace(stdout.String()), "zadig-review-agent v0.1.0"; got != want {
+			t.Fatalf("got %q want %q", got, want)
+		}
+	}
+
 	version.Version = "v1.2.3"
 	version.Commit = "0123456789abcdef"
 	version.Date = "2026-07-20T08:00:00Z"
