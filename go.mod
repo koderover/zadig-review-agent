@@ -5,7 +5,7 @@ go 1.24
 require (
 	github.com/anthropics/anthropic-sdk-go v1.57.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
-	github.com/openai/openai-go/v3 v3.42.0
+	github.com/openai/openai-go/v3 v3.44.0
 	google.golang.org/genai v1.63.0
 )
 
