@@ -189,6 +189,17 @@ func TestRepositoryPathGroupingUsesFlattenedFullPath(t *testing.T) {
 	}
 }
 
+func TestReviewCIFlagRejected(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code, err := Run(context.Background(), []string{"review", "--ci", "--preview"}, &stdout, &stderr)
+	if err == nil || code == 0 {
+		t.Fatalf("expected --ci to be rejected, code=%d stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "flag provided but not defined") {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+}
+
 func TestReviewBaseFlagRejected(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code, err := Run(context.Background(), []string{"review", "--base", "origin/main", "--preview"}, &stdout, &stderr)
@@ -278,7 +289,6 @@ func TestConfigSetHelpListsKeys(t *testing.T) {
 func TestApplyCLIOverrides(t *testing.T) {
 	cfg := config.Default()
 	visited := map[string]bool{
-		"ci":                     true,
 		"concurrency":            true,
 		"context-lines":          true,
 		"max-tool-rounds":        true,
@@ -297,7 +307,6 @@ func TestApplyCLIOverrides(t *testing.T) {
 		"progress":               true,
 	}
 	err := applyCLIOverrides(&cfg, visited, cliOverrides{
-		ciMode:              true,
 		concurrency:         8,
 		contextLines:        12,
 		maxToolRounds:       3,

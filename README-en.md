@@ -139,13 +139,13 @@ zadig-review-agent rules check internal/reviewer/reviewer.go
 
 ## CI usage
 
-The `--ci` flag selects concise console output. Explicit report paths are convenient for CI artifacts:
+In CI, use `--console summary` for concise final output and explicit report paths for convenient artifact upload:
 
 ```bash
 zadig-review-agent review \
   --from origin/main \
   --to HEAD \
-  --ci \
+  --console summary \
   --output-json "$PWD/review-report.json" \
   --output-md "$PWD/review-report.md"
 ```

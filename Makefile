@@ -24,10 +24,10 @@ help:
 	@echo "  clean       Remove build output"
 
 fmt:
-	gofmt -w cmd internal
+	gofmt -w main.go internal
 
 fmt-check:
-	@test -z "$$(gofmt -l cmd internal)" || (gofmt -l cmd internal && exit 1)
+	@test -z "$$(gofmt -l main.go internal)" || (gofmt -l main.go internal && exit 1)
 
 verify:
 	go mod verify

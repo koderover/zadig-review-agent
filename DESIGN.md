@@ -112,7 +112,7 @@ built-in defaults < config file < ZADIG_REVIEW_MODEL_* < review flags
 
 Environment variables are `ZADIG_REVIEW_MODEL_PROTOCOL`, `ZADIG_REVIEW_MODEL_NAME`, `ZADIG_REVIEW_MODEL_ENDPOINT`, `ZADIG_REVIEW_MODEL_TIMEOUT`, and `ZADIG_REVIEW_MODEL_API_KEY`.
 
-`config show` redacts API keys, while `config get model.api_key` returns the actual value. A real review rejects the placeholder default model; preview does not require model configuration. `--ci` selects summary console output unless an explicit `--console` overrides it. API keys can only come from configuration or the environment, not review flags.
+`config show` redacts API keys, while `config get model.api_key` returns the actual value. A real review rejects the placeholder default model; preview does not require model configuration. Review controls, model settings, and output settings can be overridden by review flags. API keys can only come from configuration or the environment, not review flags.
 
 ## 5. Rules
 

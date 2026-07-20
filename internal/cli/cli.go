@@ -59,7 +59,6 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	commit := fs.String("commit", "", "commit sha to review")
 	rulePath := fs.String("rule", "", "path to Zadig review rules JSON")
 	preview := fs.Bool("preview", false, "print file filtering and rule resolution without invoking the model")
-	ciMode := fs.Bool("ci", false, "use CI-friendly console output")
 	concurrency := fs.Int("concurrency", 0, "max concurrent file reviews")
 	contextLines := fs.Int("context-lines", 0, "context lines around changes")
 	maxToolRounds := fs.Int("max-tool-rounds", 0, "max main tool-loop request rounds")
@@ -88,7 +87,6 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	}
 	visited := visitedFlags(fs)
 	if err := applyCLIOverrides(&cfg, visited, cliOverrides{
-		ciMode:              *ciMode,
 		concurrency:         *concurrency,
 		contextLines:        *contextLines,
 		maxToolRounds:       *maxToolRounds,
@@ -575,7 +573,6 @@ func usage(w io.Writer) {
 }
 
 type cliOverrides struct {
-	ciMode              bool
 	concurrency         int
 	contextLines        int
 	maxToolRounds       int
@@ -603,9 +600,6 @@ func visitedFlags(fs *flag.FlagSet) map[string]bool {
 }
 
 func applyCLIOverrides(cfg *config.Config, visited map[string]bool, o cliOverrides) error {
-	if visited["ci"] && o.ciMode {
-		cfg.Output.Console = "summary"
-	}
 	if visited["concurrency"] {
 		if o.concurrency < 1 {
 			return fmt.Errorf("--concurrency must be a positive integer")

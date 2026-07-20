@@ -145,7 +145,7 @@ export ZADIG_REVIEW_MODEL_API_KEY=...
 
 `config show` 会隐藏 API Key；`config get model.api_key` 返回真实值。正式 review 检测到默认模型占位值时返回配置错误，preview 不要求模型配置。
 
-`--ci` 默认将控制台模式切换为 `summary`，显式 `--console` 可覆盖。审查控制、模型协议/名称/Endpoint/Timeout 和输出设置可通过 review flags 覆盖；API Key 只通过配置文件或环境变量传入。
+审查控制、模型协议/名称/Endpoint/Timeout 和输出设置可通过 review flags 覆盖；API Key 只通过配置文件或环境变量传入。
 
 ## 5. Rules
 

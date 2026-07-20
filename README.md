@@ -139,13 +139,13 @@ zadig-review-agent rules check internal/reviewer/reviewer.go
 
 ## CI 用法
 
-`--ci` 会启用精简控制台输出。在 CI 中显式指定报告路径便于上传制品：
+在 CI 中可使用 `--console summary` 精简最终结果，并显式指定报告路径以便上传制品：
 
 ```bash
 zadig-review-agent review \
   --from origin/main \
   --to HEAD \
-  --ci \
+  --console summary \
   --output-json "$PWD/review-report.json" \
   --output-md "$PWD/review-report.md"
 ```
