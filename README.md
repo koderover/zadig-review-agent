@@ -4,55 +4,55 @@
 [![CodeQL](https://github.com/koderover/zadig-review-agent/actions/workflows/codeql.yml/badge.svg)](https://github.com/koderover/zadig-review-agent/actions/workflows/codeql.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Read-only, LLM-powered code review for local development and CI workflows.
+面向本地开发和 CI 工作流的只读大模型代码审查工具。
 
-English | [简体中文](README-zh-CN.md)
+[English](README-en.md) | 简体中文
 
-## What it does
+## 功能简介
 
-Zadig Review Agent reviews Git changes, asks a configured language model to identify concrete defects, validates every finding against the actual diff, and produces console, JSON, and Markdown reports. It focuses on correctness, security, concurrency, resource management, performance, compatibility, and missing critical tests.
+Zadig Review Agent 读取 Git 变更，使用用户配置的大语言模型识别具体缺陷，将每条问题与真实 diff 进行校验，并生成控制台、JSON 和 Markdown 报告。审查重点包括正确性、安全、并发、资源管理、性能、兼容性和关键测试缺失。
 
-Key properties:
+主要特性：
 
-- reviews a workspace, one commit, or a ref range;
-- supports OpenAI, Gemini, and Anthropic protocols through their official Go SDKs;
-- applies built-in or repository-specific review rules;
-- exposes only read-only repository tools to the model;
-- returns deterministic exit codes suitable for CI quality gates;
-- never writes comments back to a forge or modifies the reviewed repository.
+- 支持审查工作区、单个提交或两个 ref 之间的变更；
+- 通过官方 Go SDK 支持 OpenAI、Gemini 和 Anthropic 协议；
+- 支持内置规则和仓库自定义规则；
+- 只向模型提供只读仓库工具；
+- 提供适合 CI 质量门禁的确定性退出码；
+- 不向代码托管平台回写评论，也不修改被审查仓库。
 
-This project is a review assistant, not a substitute for tests, security analysis, or human review. Model output can be incomplete or incorrect.
+本项目是审查辅助工具，不能替代测试、安全扫描或人工审查。模型输出可能不完整或不准确。
 
-## Requirements
+## 环境要求
 
-- Go 1.24 or later when building from source
-- Git and a Git repository to review
-- credentials for one supported model provider (not needed for `--preview`)
+- 从源码构建时需要 Go 1.24 或更高版本
+- Git 以及一个待审查的 Git 仓库
+- 一个受支持模型服务的凭证（`--preview` 不需要）
 
-## Installation
+## 安装
 
-### Go install
+### 使用 Go 安装
 
-After the first tagged release is available:
+首个标签版本发布后可执行：
 
 ```bash
 go install github.com/koderover/zadig-review-agent@latest
 ```
 
-`go install` honors the standard `GOPROXY` setting. To use a trusted organization or regional proxy for one installation:
+`go install` 支持标准 `GOPROXY` 配置。单次安装可以使用可信的企业或区域代理：
 
 ```bash
 GOPROXY=https://your-go-proxy.example,direct \
   go install github.com/koderover/zadig-review-agent@latest
 ```
 
-Use an explicit version such as `@v0.1.0` when reproducible installation is more important than tracking the latest release.
+如果需要可复现安装，请使用 `@v0.1.0` 等明确版本，不要使用 `@latest`。
 
-### Release archive
+### 下载发布包
 
-Download the archive for Linux, macOS, or Windows from [GitHub Releases](https://github.com/koderover/zadig-review-agent/releases), then verify it with `checksums.txt`.
+从 [GitHub Releases](https://github.com/koderover/zadig-review-agent/releases) 下载 Linux、macOS 或 Windows 压缩包，并使用 `checksums.txt` 校验。
 
-### Build from source
+### 从源码构建
 
 ```bash
 git clone https://github.com/koderover/zadig-review-agent.git
@@ -61,15 +61,15 @@ make build
 ./bin/zadig-review-agent version
 ```
 
-## Quick start
+## 快速开始
 
-Preview which files and rules would be used without contacting a model:
+先在不访问模型的情况下预览文件过滤与规则解析结果：
 
 ```bash
 zadig-review-agent review --preview
 ```
 
-Configure a provider. Keeping the API key in an environment variable avoids writing it to disk or shell history:
+配置模型。建议通过环境变量提供 API Key，避免将其写入磁盘或 Shell 历史：
 
 ```bash
 zadig-review-agent config set model.protocol openai
@@ -78,39 +78,39 @@ zadig-review-agent config set model.endpoint https://api.openai.com/v1
 export ZADIG_REVIEW_MODEL_API_KEY='your-api-key'
 ```
 
-Review the current workspace:
+审查当前工作区：
 
 ```bash
 zadig-review-agent review
 ```
 
-Review a commit or a range:
+审查单个提交或一个范围：
 
 ```bash
 zadig-review-agent review --commit <sha>
 zadig-review-agent review --from origin/main --to HEAD
 ```
 
-Use `zadig-review-agent help` and `zadig-review-agent review --help` for the complete command-line reference.
+使用 `zadig-review-agent help` 和 `zadig-review-agent review --help` 查看完整命令参数。
 
-## Configuration
+## 配置
 
-The default configuration file is `~/.zadig-review-agent/config.yaml`. Start from [.zadig-review-agent.example.yaml](.zadig-review-agent.example.yaml), or use `config set`:
+默认配置文件为 `~/.zadig-review-agent/config.yaml`。可以参考 [.zadig-review-agent.example.yaml](.zadig-review-agent.example.yaml)，或使用 `config set`：
 
 ```bash
 zadig-review-agent config path
 zadig-review-agent config show
 zadig-review-agent config get model.name
-zadig-review-agent config set output.language en-US
+zadig-review-agent config set output.language zh-CN
 ```
 
-Configuration precedence is:
+配置优先级：
 
 ```text
-built-in defaults < configuration file < ZADIG_REVIEW_MODEL_* < review flags
+内置默认值 < 配置文件 < ZADIG_REVIEW_MODEL_* < review 命令参数
 ```
 
-Supported model environment variables are:
+支持以下模型环境变量：
 
 ```text
 ZADIG_REVIEW_MODEL_PROTOCOL
@@ -120,26 +120,26 @@ ZADIG_REVIEW_MODEL_TIMEOUT
 ZADIG_REVIEW_MODEL_API_KEY
 ```
 
-`config show` redacts the API key. `config get model.api_key` intentionally returns the real value, so avoid printing it in logs.
+`config show` 会隐藏 API Key。`config get model.api_key` 会按设计返回真实值，请勿在日志中调用它。
 
-## Review rules
+## 审查规则
 
-Rules are declarative JSON data and cannot execute code. They are loaded in this order:
+规则是不能执行代码的声明式 JSON 数据，按以下顺序加载：
 
 1. `--rule <path>`
-2. `<repository>/.zadig-review/rules.json`
+2. `<仓库>/.zadig-review/rules.json`
 3. `~/.zadig-review/rules.json`
-4. embedded system rules
+4. 内置系统规则
 
-See [.zadig-review/rules.example.json](.zadig-review/rules.example.json) and [.zadig-review/docs/go-review.md](.zadig-review/docs/go-review.md). Check the resolved rule for a path with:
+参考 [.zadig-review/rules.example.json](.zadig-review/rules.example.json) 和 [.zadig-review/docs/go-review.md](.zadig-review/docs/go-review.md)。可检查单个路径最终使用的规则：
 
 ```bash
 zadig-review-agent rules check internal/reviewer/reviewer.go
 ```
 
-## CI usage
+## CI 用法
 
-The `--ci` flag selects concise console output. Explicit report paths are convenient for CI artifacts:
+`--ci` 会启用精简控制台输出。在 CI 中显式指定报告路径便于上传制品：
 
 ```bash
 zadig-review-agent review \
@@ -150,58 +150,103 @@ zadig-review-agent review \
   --output-md "$PWD/review-report.md"
 ```
 
-Exit codes are stable:
+退出码保持稳定：
 
-| Code | Meaning |
+| 退出码 | 含义 |
 | --- | --- |
-| `0` | Review completed and no finding matched `fail_on`. |
-| `1` | Review completed and at least one finding matched `fail_on`. |
-| `2` | Configuration, Git, provider, filtering, or review processing was incomplete. |
-| `130` | The process was canceled. |
+| `0` | 审查完整，且没有 finding 命中 `fail_on`。 |
+| `1` | 审查完整，且至少一个 finding 命中 `fail_on`。 |
+| `2` | 配置、Git、Provider、过滤或审查流程不完整。 |
+| `130` | 进程被取消。 |
 
-The default quality gate fails on `critical` and `high` findings. Configure it with `review.fail_on` or `--fail-on`.
+默认质量门禁在出现 `critical` 或 `high` finding 时失败，可通过 `review.fail_on` 或 `--fail-on` 调整。
 
-## Privacy and security
+## 隐私与安全
 
-- Diffs, rule text, and repository content requested through read-only tools are sent to the model endpoint you configure. Review the provider's data policy before using sensitive code.
-- JSON reports retain detailed tool output and raw model responses for diagnostics and can contain source code. Reports and configuration files are created with restricted permissions, but you must protect, retain, and delete them according to your own policy.
-- The agent does not provide the model with shell, network, or write-file tools and does not execute repository-provided commands or configuration.
-- API keys are not inserted into prompts or reports. Prefer environment variables or a secret manager in CI.
-- The project has no telemetry service.
+- Diff、规则文本以及通过只读工具获取的仓库内容会发送到你配置的模型 Endpoint。处理敏感代码前，请确认模型服务商的数据政策。
+- JSON 报告为便于诊断会保存详细工具输出和模型原始响应，其中可能包含源码。报告和配置文件会以受限权限创建，但仍应按你的安全策略进行保护、保留和删除。
+- Agent 不向模型提供 Shell、网络或文件写入工具，也不执行仓库提供的命令或配置。
+- API Key 不会进入 Prompt 或报告。CI 中建议使用环境变量或密钥管理服务。
+- 本项目不包含遥测服务。
 
-Please report vulnerabilities according to [SECURITY.md](SECURITY.md), not through a public issue.
+发现安全漏洞时请按 [SECURITY.md](SECURITY.md) 私下报告，不要创建公开 Issue。
 
-## Troubleshooting
+## 故障排查
 
-### Model is not configured
+### 提示模型未配置
 
-Set `model.name` and the provider settings, or export the corresponding `ZADIG_REVIEW_MODEL_*` variables. `--preview` works without model credentials.
+设置 `model.name` 和模型服务配置，或导出相应的 `ZADIG_REVIEW_MODEL_*` 环境变量。`--preview` 无需模型凭证。
 
-### A range review cannot resolve its base
+### 范围审查无法解析基准
 
-Both refs must exist locally. Fetch the target branch before running the review, for example `git fetch origin main`.
+两个 ref 必须已存在于本地。运行审查前先获取目标分支，例如 `git fetch origin main`。
 
-### A file is unexpectedly excluded
+### 文件被意外排除
 
-Run the same review with `--preview`, then inspect the exclusion reason and resolved rule. Use `rules check` for a single path.
+为相同审查增加 `--preview`，查看排除原因与解析后的规则；使用 `rules check` 检查单个路径。
 
-### The review exits with code 2
+### 审查以退出码 2 结束
 
-Inspect warnings and errors in the console or JSON report. An incomplete model tool loop, token limit, relocation, or filtering phase intentionally cannot pass the quality gate.
+检查控制台或 JSON 报告中的 warning 和 error。模型工具循环、Token、Relocation 或过滤阶段不完整时，工具会有意阻止质量门禁通过。
 
-## Development
+## 开发
 
 ```bash
 make help
 make check
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and [DESIGN.md](DESIGN.md) for implementation details.
+贡献流程参见 [CONTRIBUTING-zh-CN.md](CONTRIBUTING-zh-CN.md)，实现细节参见 [DESIGN-zh-CN.md](DESIGN-zh-CN.md)。
 
-## Acknowledgements
+## 发布
 
-Zadig Review Agent was inspired by [OpenCodeReview (OCR)](https://github.com/alibaba/open-code-review), with its design adapted to the needs of local development and CI workflows.
+发布配置位于 [.goreleaser.yaml](.goreleaser.yaml)，需要 GoReleaser v2。macOS 可使用 Homebrew 安装：
 
-## License
+```bash
+brew install goreleaser
+```
 
-Licensed under the [Apache License 2.0](LICENSE).
+也可以使用 Go 安装：
+
+```bash
+go install github.com/goreleaser/goreleaser/v2@latest
+```
+
+正式发布前先运行完整检查和本地快照。快照产物会写入 `dist/`，不会上传到 GitHub：
+
+```bash
+make check
+goreleaser check
+goreleaser release --snapshot --clean
+```
+
+### 标签自动发布（推荐）
+
+创建并推送 `vX.Y.Z` 格式的语义化版本标签：
+
+```bash
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+推送后，[Release 工作流](.github/workflows/release.yml)会运行测试，并自动构建 Linux、macOS 和 Windows 的 amd64/arm64 发布包、生成 SHA-256 校验文件并创建 GitHub Release。
+
+### 本地手动发布
+
+手动发布需要一个具有仓库 Contents 读写权限的 GitHub Token。由于推送标签会触发自动发布，必须先临时关闭 Release 工作流，发布结束后再恢复：
+
+```bash
+git tag -a v0.1.0 -m "Release v0.1.0"
+gh workflow disable release.yml
+git push origin v0.1.0
+
+GITHUB_TOKEN="$(gh auth token)" goreleaser release --clean
+
+gh workflow enable release.yml
+```
+
+无论手动发布是否成功，都应确保 `release.yml` 已重新启用。同一个标签不要同时运行自动和手动发布，否则会产生重复制品冲突。
+
+## 许可证
+
+本项目使用 [Apache License 2.0](LICENSE) 许可证。
