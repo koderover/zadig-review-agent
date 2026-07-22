@@ -25,8 +25,8 @@ This project is a review assistant, not a substitute for tests, security analysi
 ## Requirements
 
 - Go 1.25.12 or later when building from source
-- Git and a Git repository to review
-- credentials for one supported model provider (not needed for `--preview`)
+- Git 2.38.0 or later and a Git repository to review
+- credentials for a supported LLM service (not needed for `--preview`)
 
 ## Installation
 
@@ -36,7 +36,7 @@ This project is a review assistant, not a substitute for tests, security analysi
 go install github.com/koderover/zadig-review-agent@latest
 ```
 
-`go install` honors the standard `GOPROXY` setting. To use a trusted proxy for one installation:
+`go install` supports the standard `GOPROXY` setting:
 
 ```bash
 GOPROXY=https://goproxy.cn,direct \
@@ -58,13 +58,13 @@ make build
 
 ## Quick start
 
-Preview which files and rules would be used without contacting a model:
+You can preview file filtering and rule resolution without contacting a model:
 
 ```bash
 zadig-review-agent review --preview
 ```
 
-Configure a provider. Keeping the API key in an environment variable avoids writing it to disk or shell history:
+Configure the model. We recommend providing the API key through an environment variable to avoid writing it to disk or shell history:
 
 ```bash
 zadig-review-agent config set model.protocol openai
@@ -170,7 +170,7 @@ Please report vulnerabilities according to [SECURITY.md](SECURITY.md), not throu
 
 ### Model is not configured
 
-Set `model.name` and the provider settings, or export the corresponding `ZADIG_REVIEW_MODEL_*` variables. `--preview` works without model credentials.
+Set `model.name` and the model service settings, or export the corresponding `ZADIG_REVIEW_MODEL_*` variables. `--preview` works without model credentials.
 
 ### A range review cannot resolve its base
 
