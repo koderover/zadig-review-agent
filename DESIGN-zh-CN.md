@@ -294,7 +294,7 @@ Commit/Range 模式的 `file_read` 从被审查 ref 读取，Workspace 模式读
 
 `severity` 和 `category` 在最终验证前统一转为小写。工具 schema 将 category 限制为 `correctness`、`security`、`concurrency`、`performance`、`compatibility` 和 `tests`；对少数常见兼容值做确定性归一化，例如 `Error Handling`、`reliability` 映射为 `correctness`，`test coverage` 映射为 `tests`。未知类别仍会被丢弃。
 
-Review Filter 完成后，如果输出语言不是 English，Reviewer 使用独立的无工具 Localization Prompt 批量本地化 `title`、`problem`、`evidence` 和 `suggestion`。该阶段只能按候选 ID 改写人类可读字段，不能修改文件、行号、severity、category、confidence 或 finding 数量。Filter 和 Localization 接受裸数组及有限的常见包装对象；响应非法时追加严格格式提示重试一次。重试后仍失败则保留原 finding、记录 warning，并将审查标记为不完整。
+Review Filter 完成后，如果输出语言不是 English，Reviewer 使用独立的无工具 Localization Prompt 批量本地化 `title`、`problem`、`evidence` 和 `suggestion`；当所有人类可读字段已经使用请求的中文文字时跳过这次重复请求。该阶段只能按候选 ID 改写人类可读字段，不能修改文件、行号、severity、category、confidence 或 finding 数量。Filter 和 Localization 接受裸数组及有限的常见包装对象；响应非法时追加严格格式提示重试一次。`finish_reason=length` 会被明确报告为输出截断，截断内容不会回放到重试上下文。重试后仍失败则保留原 finding、记录 warning，并将审查标记为不完整。
 
 处理顺序：
 

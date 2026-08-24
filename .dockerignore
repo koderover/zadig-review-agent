@@ -1,0 +1,11 @@
+.git
+.github
+.idea
+.vscode
+bin
+dist
+coverage.out
+Dockerfile*
+README*.md
+CONTRIBUTING*.md
+DESIGN*.md

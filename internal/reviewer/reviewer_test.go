@@ -124,7 +124,7 @@ func (s *sequenceLLM) Complete(_ context.Context, _ protocol.Request) (protocol.
 }
 
 func TestRunnerCountsFailedLLMRequest(t *testing.T) {
-	file := gitdiff.FileDiff{Path: "main.go", Hunks: []gitdiff.Hunk{{ChangedLines: map[int]bool{1: true}}}}
+	file := gitdiff.FileDiff{Path: "main.go", Hunks: []gitdiff.Hunk{{ChangedLines: map[int]bool{1: true}, Lines: []gitdiff.Line{{Kind: '+', NewLine: 1, Text: "SENSITIVE_PROMPT_CONTENT"}}}}}
 	r := Runner{
 		Root:         "/repo",
 		Config:       config.Default(),
@@ -139,6 +139,26 @@ func TestRunnerCountsFailedLLMRequest(t *testing.T) {
 	}
 	if !report.Incomplete || report.Usage.LLMRequests != 1 {
 		t.Fatalf("expected failed request to be counted: %+v", report)
+	}
+	if len(report.Errors) != 1 {
+		t.Fatalf("expected one detailed error: %+v", report.Errors)
+	}
+	detail := report.Errors[0]
+	for _, want := range []string{
+		"llm request failed", "stage=review", `file="main.go"`, `agent_source="internal/reviewer/agent_loop.go:`, "round=1", "request_attempts=1",
+		"duration=", "configured_timeout=2m0s", "review_concurrency=4",
+		"message_count=2", `tools="file_read,code_search,file_find,code_comment,task_done"`,
+		"require_tool=false", "estimated_tokens=", "protocol=openai", `model="configured-model"`, "timeout",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Fatalf("detailed error missing %q: %s", want, detail)
+		}
+	}
+	if strings.Contains(detail, "SENSITIVE_PROMPT_CONTENT") {
+		t.Fatalf("detailed error leaked prompt content: %s", detail)
+	}
+	if len(report.Process.ModelResponses) != 1 || report.Process.ModelResponses[0].Stage != "review" || report.Process.ModelResponses[0].Attempt != 1 || report.Process.ModelResponses[0].Status != "error" || report.Process.ModelResponses[0].Error != detail {
+		t.Fatalf("main-loop model failure was not audited: %+v", report.Process.ModelResponses)
 	}
 }
 
@@ -488,6 +508,32 @@ func TestReviewFilterInvalidResponseKeepsOriginalFindings(t *testing.T) {
 	}
 }
 
+func TestReviewFilterReportsTruncatedModelOutput(t *testing.T) {
+	candidates := []agent.Finding{{File: "main.go", Title: "original"}}
+	llm := &recordingLLM{responses: []protocol.Response{
+		{Text: `["TRUNCATED_SENTINEL`, FinishReason: "length", Usage: agent.TokenUsage{CompletionTokens: 4096}},
+		{Text: `["still truncated`, FinishReason: "length", Usage: agent.TokenUsage{CompletionTokens: 4096}},
+	}}
+	r := Runner{Config: config.Default(), LLM: llm}
+	filtered, warning := r.filterFindings(context.Background(), candidates, map[string]string{
+		"current_file_path": "main.go", "system_rule": "rule", "diff": "diff",
+	}, &agent.TokenUsage{})
+	if len(filtered) != 1 || filtered[0] != candidates[0] {
+		t.Fatalf("truncated filter must preserve candidates: %+v", filtered)
+	}
+	for _, want := range []string{
+		"review_filter_invalid_response: model output truncated", `agent_source="internal/reviewer/agent_loop.go:`,
+		"finish_reason=\"length\"", "completion_tokens=4096", "visible_chars=",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("truncation warning missing %q: %s", want, warning)
+		}
+	}
+	if len(llm.requests) != 2 || requestContains(llm.requests[1], "TRUNCATED_SENTINEL") {
+		t.Fatalf("truncated output must not be replayed into the retry: %+v", llm.requests)
+	}
+}
+
 type timeoutError struct{}
 
 func (timeoutError) Error() string   { return "timeout" }
@@ -703,6 +749,51 @@ func TestRunnerToolLoopReadsContextBeforeComment(t *testing.T) {
 	}
 	if strings.Contains(progressText, "output_bytes=") || strings.Contains(progressText, "truncated=") {
 		t.Fatalf("tool progress must keep output metadata in JSON only:\n%s", progressText)
+	}
+}
+
+func TestRunnerNormalizesInvalidToolCallsBeforeReplayingHistory(t *testing.T) {
+	for _, arguments := range []string{"", `{"search_text":`} {
+		t.Run(fmt.Sprintf("arguments_%q", arguments), func(t *testing.T) {
+			file := reviewTestFile()
+			llm := &recordingLLM{responses: []protocol.Response{
+				toolResponse("", "code_search", arguments),
+				doneResponse(),
+			}}
+			r := Runner{Root: t.TempDir(), Config: config.Default(), Git: fakeGit{files: []gitdiff.FileDiff{file}}, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, RuleResolver: testRuleResolver()}
+			report, err := r.Run(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if report.Incomplete || report.ExitCode != agent.ExitOK {
+				t.Fatalf("invalid tool arguments should remain recoverable: %+v", report)
+			}
+			if len(llm.requests) != 2 {
+				t.Fatalf("expected the corrected history on a second request, got %d requests", len(llm.requests))
+			}
+
+			var assistant *protocol.Message
+			var toolResult *protocol.Message
+			for index := range llm.requests[1].Messages {
+				message := &llm.requests[1].Messages[index]
+				if message.Role == protocol.RoleAssistant && len(message.ToolCalls) > 0 {
+					assistant = message
+				}
+				if message.Role == protocol.RoleTool {
+					toolResult = message
+				}
+			}
+			if assistant == nil || toolResult == nil || len(assistant.ToolCalls) != 1 {
+				t.Fatalf("missing replayed tool-call pair: %+v", llm.requests[1].Messages)
+			}
+			call := assistant.ToolCalls[0]
+			if call.ID == "" || call.Arguments != `{}` || toolResult.ToolCallID != call.ID {
+				t.Fatalf("tool-call history was not normalized: call=%+v result=%+v", call, *toolResult)
+			}
+			if len(report.Process.ToolCalls) != 1 || report.Process.ToolCalls[0].Status != "error" || report.Process.ToolCalls[0].Summary != "invalid tool arguments" {
+				t.Fatalf("original invalid call was not recorded: %+v", report.Process.ToolCalls)
+			}
+		})
 	}
 }
 

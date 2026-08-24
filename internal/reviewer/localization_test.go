@@ -46,6 +46,42 @@ func TestLocalizeFindingsSkipsEnglishOutput(t *testing.T) {
 	}
 }
 
+func TestLocalizeFindingsSkipsAlreadyChineseOutput(t *testing.T) {
+	original := []agent.Finding{{
+		Title: "错误被静默丢弃", Problem: "新增分支直接返回 nil。",
+		Evidence: "代码使用 `return nil`。", Suggestion: "返回原始错误。",
+	}}
+	r := Runner{Config: config.Default(), LLM: failLLM{t: t}}
+	localized, warning := r.localizeFindings(context.Background(), original, "Chinese", &agent.TokenUsage{})
+	if warning != "" || localized[0].Title != original[0].Title {
+		t.Fatalf("already-Chinese findings should not invoke localization: %+v warning=%q", localized, warning)
+	}
+}
+
+func TestLocalizeFindingsReportsTruncatedModelOutput(t *testing.T) {
+	llm := &recordingLLM{responses: []protocol.Response{
+		{Text: `[{"id":"c-0","title":"截断`, FinishReason: "length", Usage: agent.TokenUsage{CompletionTokens: 4096}},
+		{Text: `[{"id":"c-0","title":"仍然截断`, FinishReason: "length", Usage: agent.TokenUsage{CompletionTokens: 4096}},
+	}}
+	r := Runner{Config: config.Default(), LLM: llm}
+	original := []agent.Finding{{File: "main.go", Title: "English title", Problem: "English problem", Evidence: "English evidence", Suggestion: "English suggestion"}}
+	localized, warning := r.localizeFindings(context.Background(), original, "Chinese", &agent.TokenUsage{})
+	if localized[0].Title != original[0].Title {
+		t.Fatalf("truncated localization must preserve original finding: %+v", localized)
+	}
+	for _, want := range []string{
+		"finding_localization_failed: model output truncated", `agent_source="internal/reviewer/localization.go:`,
+		"finish_reason=\"length\"", "completion_tokens=4096", "visible_chars=",
+	} {
+		if !strings.Contains(warning, want) {
+			t.Fatalf("truncation warning missing %q: %s", want, warning)
+		}
+	}
+	if len(llm.requests) != 2 || requestContains(llm.requests[1], "截断") {
+		t.Fatalf("truncated output must not be replayed into the retry: %+v", llm.requests)
+	}
+}
+
 func TestLocalizeFindingsAcceptsWrappedArray(t *testing.T) {
 	r := Runner{Config: config.Default(), LLM: &sequenceLLM{responses: []protocol.Response{{
 		Text: `{"findings":[{"id":"c-0","title":"标题","problem":"问题","evidence":"证据","suggestion":"建议"}]}`,

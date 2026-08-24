@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/koderover/zadig-review-agent/internal/agent"
 	"github.com/koderover/zadig-review-agent/internal/protocol"
@@ -20,6 +21,10 @@ type localizedFinding struct {
 
 func (r Runner) localizeFindings(ctx context.Context, findings []agent.Finding, language string, usage *agent.TokenUsage) ([]agent.Finding, string) {
 	if len(findings) == 0 || isEnglishLanguage(language) {
+		return findings, ""
+	}
+	if findingsAlreadyUseTargetLanguage(findings, language) {
+		r.trace("%sfinding localization skipped: already %s", r.progressFilePrefix(findings[0].File), outputLanguage(language))
 		return findings, ""
 	}
 	items := make([]localizedFinding, 0, len(findings))
@@ -43,24 +48,33 @@ func (r Runner) localizeFindings(ctx context.Context, findings []agent.Finding, 
 	request := protocol.Request{Messages: messages}
 	var localized []localizedFinding
 	var parseErr error
+	var lastResponse protocol.Response
 	for attempt := 1; attempt <= 2; attempt++ {
 		response, err := r.completeAudited(ctx, "localization", findings[0].File, attempt, request, usage)
 		if err != nil {
 			return findings, "finding_localization_failed: " + err.Error()
 		}
+		lastResponse = response
 		localized, parseErr = parseLocalizedFindings(response.Text)
 		if parseErr == nil {
 			break
 		}
 		if attempt == 1 {
-			request.Messages = append(request.Messages,
-				protocol.Message{Role: protocol.RoleAssistant, Content: response.Text},
-				protocol.Message{Role: protocol.RoleUser, Content: "Your response was not valid. Return only the complete JSON array with one item for every supplied ID and no wrapper or explanation."},
-			)
+			if !modelOutputTruncated(response) {
+				request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleAssistant, Content: response.Text})
+			}
+			request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleUser, Content: "Your response was not valid. Return only the complete JSON array with one item for every supplied ID and no wrapper or explanation."})
 			r.trace("%sfinding localization response invalid; retrying", r.progressFilePrefix(findings[0].File))
 		}
 	}
 	if parseErr != nil {
+		if modelOutputTruncated(lastResponse) {
+			return findings, fmt.Sprintf(
+				"finding_localization_failed: model output truncated (agent_source=%q stage=localization file=%q attempt=2 finish_reason=%q completion_tokens=%d visible_chars=%d): %v",
+				agentSourceLocation(0), findings[0].File, lastResponse.FinishReason,
+				lastResponse.Usage.CompletionTokens, len([]rune(lastResponse.Text)), parseErr,
+			)
+		}
 		return findings, "finding_localization_failed: invalid response: " + parseErr.Error()
 	}
 	if len(localized) != len(findings) {
@@ -83,6 +97,50 @@ func (r Runner) localizeFindings(ctx context.Context, findings []agent.Finding, 
 		result[index].Suggestion = item.Suggestion
 	}
 	return result, ""
+}
+
+func modelOutputTruncated(response protocol.Response) bool {
+	finishReason := strings.ToLower(strings.TrimSpace(response.FinishReason))
+	return finishReason == "length" || finishReason == "max_tokens"
+}
+
+func findingsAlreadyUseTargetLanguage(findings []agent.Finding, language string) bool {
+	if !isChineseLanguage(language) {
+		return false
+	}
+	sawText := false
+	for _, finding := range findings {
+		for _, field := range []string{finding.Title, finding.Problem, finding.Evidence, finding.Suggestion} {
+			if strings.TrimSpace(field) == "" {
+				continue
+			}
+			sawText = true
+			if !usesChineseScript(field) {
+				return false
+			}
+		}
+	}
+	return sawText
+}
+
+func isChineseLanguage(language string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(language))
+	return normalized == "chinese" || normalized == "zh" || normalized == "中文" ||
+		strings.HasPrefix(normalized, "zh-") || strings.HasPrefix(normalized, "zh_") ||
+		strings.Contains(normalized, "简体中文") || strings.Contains(normalized, "繁體中文")
+}
+
+func usesChineseScript(text string) bool {
+	hasHan := false
+	for _, char := range text {
+		switch {
+		case unicode.Is(unicode.Hiragana, char), unicode.Is(unicode.Katakana, char), unicode.Is(unicode.Hangul, char):
+			return false
+		case unicode.Is(unicode.Han, char):
+			hasHan = true
+		}
+	}
+	return hasHan
 }
 
 func parseLocalizedFindings(text string) ([]localizedFinding, error) {

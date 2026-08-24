@@ -209,7 +209,7 @@ Commit/range `file_read` uses the reviewed ref; workspace mode uses the working 
 
 `code_comment` submits severity, category, optional rule ID, path, line range, existing code, human-readable explanation, suggestion, and confidence. Severity and category are normalized to lowercase. Categories are restricted to correctness, security, concurrency, performance, compatibility, and tests, with deterministic aliases for a few common model values. Unknown categories are rejected.
 
-After Review Filter, non-English output is localized in one tool-free batch. Localization can only rewrite title, problem, evidence, and suggestion by candidate ID. It cannot change paths, lines, severity, category, confidence, or finding count. Review Filter and Localization accept bare arrays and a small set of common wrappers, retry malformed responses once with strict formatting, and retain original findings while marking the review incomplete if retries fail.
+After Review Filter, non-English output is localized in one tool-free batch unless every human-readable field already uses the requested Chinese script. Localization can only rewrite title, problem, evidence, and suggestion by candidate ID. It cannot change paths, lines, severity, category, confidence, or finding count. Review Filter and Localization accept bare arrays and a small set of common wrappers, retry malformed responses once with strict formatting, and retain original findings while marking the review incomplete if retries fail. A response ending with `finish_reason=length` is reported explicitly as truncated and is not replayed into the retry context.
 
 Validation order is:
 

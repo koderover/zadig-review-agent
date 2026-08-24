@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -198,11 +200,16 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values m
 				r.trace("%scontext compression disabled after failure", r.progressFilePrefix(file.Path))
 			}
 		}
-		response, err := r.completeTracked(ctx, protocol.Request{Messages: messages, Tools: requestTools, RequireTool: requestRequiredTool}, usage)
+		request := protocol.Request{Messages: messages, Tools: requestTools, RequireTool: requestRequiredTool}
+		requestStarted := time.Now()
+		response, err := r.completeDiagnosed(ctx, "review", file.Path, round+1, request, usage)
 		if err != nil {
 			if errors.Is(err, errTokenThreshold) {
 				warnings = append(warnings, "token_threshold_exceeded: "+file.Path)
 				return comments, warnings, nil
+			}
+			if r.process != nil {
+				r.process.recordModelError("review", file.Path, round+1, requestStarted, response, err)
 			}
 			return nil, warnings, err
 		}
@@ -231,14 +238,27 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values m
 		consecutiveEmptyRounds = 0
 		requireTool = false
 		hadToolActivity = true
-		messages = append(messages, protocol.Message{Role: protocol.RoleAssistant, Content: response.Text, ToolCalls: response.ToolCalls})
-		done := false
-		for callIndex, toolCall := range response.ToolCalls {
-			if toolCall.ID == "" {
-				toolCall.ID = fmt.Sprintf("round-%d-call-%d", round+1, callIndex+1)
+		toolCalls := append([]protocol.ToolCall(nil), response.ToolCalls...)
+		actions := make([]toolAction, len(toolCalls))
+		argumentErrors := make([]error, len(toolCalls))
+		for callIndex := range toolCalls {
+			if toolCalls[callIndex].ID == "" {
+				toolCalls[callIndex].ID = fmt.Sprintf("round-%d-call-%d", round+1, callIndex+1)
 			}
-			action := toolAction{Tool: toolCall.Name}
-			if err := json.Unmarshal([]byte(toolCall.Arguments), &action); err != nil {
+			if err := json.Unmarshal([]byte(toolCalls[callIndex].Arguments), &actions[callIndex]); err != nil {
+				argumentErrors[callIndex] = err
+				// Tool-call arguments are replayed as part of the next model request.
+				// Keep that history valid even when a compatible endpoint emits empty
+				// or truncated JSON, while reporting the original parse error below.
+				toolCalls[callIndex].Arguments = `{}`
+			}
+		}
+		messages = append(messages, protocol.Message{Role: protocol.RoleAssistant, Content: response.Text, ToolCalls: toolCalls})
+		done := false
+		for callIndex, toolCall := range toolCalls {
+			action := actions[callIndex]
+			action.Tool = toolCall.Name
+			if err := argumentErrors[callIndex]; err != nil {
 				result := toolExecution{Output: "error: invalid tool arguments: " + err.Error(), Status: "error", Summary: "invalid tool arguments"}
 				call := r.process.begin(file.Path, round+1, action)
 				record := r.process.finish(call, result)
@@ -246,7 +266,6 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values m
 				messages = append(messages, protocol.Message{Role: protocol.RoleTool, ToolCallID: toolCall.ID, ToolName: toolCall.Name, Content: result.Output})
 				continue
 			}
-			action.Tool = toolCall.Name
 			var result toolExecution
 			switch action.Tool {
 			case "code_comment":
@@ -390,24 +409,33 @@ func (r Runner) filterFindings(ctx context.Context, candidates []agent.Finding, 
 	request := protocol.Request{Messages: messages}
 	var deletedIDs []string
 	var parseErr error
+	var lastResponse protocol.Response
 	for attempt := 1; attempt <= 2; attempt++ {
 		response, err := r.completeAudited(ctx, "review_filter", values["current_file_path"], attempt, request, usage)
 		if err != nil {
 			return candidates, "review_filter_failed: " + err.Error()
 		}
+		lastResponse = response
 		deletedIDs, parseErr = parseDeletedFindingIDs(response.Text)
 		if parseErr == nil {
 			break
 		}
 		if attempt == 1 {
-			request.Messages = append(request.Messages,
-				protocol.Message{Role: protocol.RoleAssistant, Content: response.Text},
-				protocol.Message{Role: protocol.RoleUser, Content: `Your response was not valid. Return only a complete JSON array of candidate IDs, for example ["c-0"]. An empty result must be [].`},
-			)
+			if !modelOutputTruncated(response) {
+				request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleAssistant, Content: response.Text})
+			}
+			request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleUser, Content: `Your response was not valid. Return only a complete JSON array of candidate IDs, for example ["c-0"]. An empty result must be [].`})
 			r.trace("%sreview filter response invalid; retrying", r.progressFilePrefix(values["current_file_path"]))
 		}
 	}
 	if parseErr != nil {
+		if modelOutputTruncated(lastResponse) {
+			return candidates, fmt.Sprintf(
+				"review_filter_invalid_response: model output truncated (agent_source=%q stage=review_filter file=%q attempt=2 finish_reason=%q completion_tokens=%d visible_chars=%d): %v",
+				agentSourceLocation(0), values["current_file_path"], lastResponse.FinishReason,
+				lastResponse.Usage.CompletionTokens, len([]rune(lastResponse.Text)), parseErr,
+			)
+		}
 		return candidates, "review_filter_invalid_response: " + parseErr.Error()
 	}
 	deleted := make(map[string]bool, len(deletedIDs))
@@ -451,23 +479,74 @@ func parseDeletedFindingIDs(text string) ([]string, error) {
 }
 
 func (r Runner) completeAudited(ctx context.Context, stage, file string, attempt int, request protocol.Request, usage *agent.TokenUsage) (protocol.Response, error) {
+	source := agentSourceLocation(1)
 	if r.process == nil {
-		return r.completeTracked(ctx, request, usage)
+		return r.completeDiagnosedFrom(ctx, stage, file, source, attempt, request, usage, false)
 	}
 	pending := r.process.beginModelResponse(stage, file, attempt)
-	response, err := r.completeTracked(ctx, request, usage)
+	response, err := r.completeDiagnosedFrom(ctx, stage, file, source, attempt, request, usage, false)
 	r.process.finishModelResponse(pending, response, err)
 	return response, err
 }
 
 func (r Runner) completeAuditedWithoutThreshold(ctx context.Context, stage, file string, attempt int, request protocol.Request, usage *agent.TokenUsage) (protocol.Response, error) {
+	source := agentSourceLocation(1)
 	if r.process == nil {
-		return r.completeTrackedWithoutThreshold(ctx, request, usage)
+		return r.completeDiagnosedFrom(ctx, stage, file, source, attempt, request, usage, true)
 	}
 	pending := r.process.beginModelResponse(stage, file, attempt)
-	response, err := r.completeTrackedWithoutThreshold(ctx, request, usage)
+	response, err := r.completeDiagnosedFrom(ctx, stage, file, source, attempt, request, usage, true)
 	r.process.finishModelResponse(pending, response, err)
 	return response, err
+}
+
+func (r Runner) completeDiagnosed(ctx context.Context, stage, file string, sequence int, request protocol.Request, usage *agent.TokenUsage) (protocol.Response, error) {
+	return r.completeDiagnosedFrom(ctx, stage, file, agentSourceLocation(1), sequence, request, usage, false)
+}
+
+func (r Runner) completeDiagnosedFrom(ctx context.Context, stage, file, source string, sequence int, request protocol.Request, usage *agent.TokenUsage, withoutThreshold bool) (protocol.Response, error) {
+	requestsBefore := usage.LLMRequests
+	started := time.Now()
+	var response protocol.Response
+	var err error
+	if withoutThreshold {
+		response, err = r.completeTrackedWithoutThreshold(ctx, request, usage)
+	} else {
+		response, err = r.completeTracked(ctx, request, usage)
+	}
+	if err == nil || errors.Is(err, errTokenThreshold) {
+		return response, err
+	}
+	requestAttempts := usage.LLMRequests - requestsBefore
+	duration := time.Since(started).Round(time.Millisecond)
+	position := fmt.Sprintf("attempt=%d", sequence)
+	if stage == "review" {
+		position = fmt.Sprintf("round=%d", sequence)
+	}
+	toolNames := make([]string, 0, len(request.Tools))
+	for _, tool := range request.Tools {
+		toolNames = append(toolNames, tool.Name)
+	}
+	return response, fmt.Errorf(
+		"llm request failed (stage=%s file=%q agent_source=%q %s request_attempts=%d duration=%s configured_timeout=%s review_concurrency=%d message_count=%d tools=%q require_tool=%t estimated_tokens=%d protocol=%s model=%q): %w",
+		stage, file, source, position, requestAttempts, duration, r.Config.Model.Timeout, r.Config.Review.Concurrency,
+		len(request.Messages), strings.Join(toolNames, ","), request.RequireTool,
+		estimateRequestTokens(request), r.Config.Model.Protocol, r.Config.Model.Name, err,
+	)
+}
+
+func agentSourceLocation(skip int) string {
+	_, file, line, ok := runtime.Caller(skip + 1)
+	if !ok {
+		return "unknown"
+	}
+	file = filepath.ToSlash(file)
+	if index := strings.LastIndex(file, "/internal/"); index >= 0 {
+		file = file[index+1:]
+	} else {
+		file = filepath.Base(file)
+	}
+	return fmt.Sprintf("%s:%d", file, line)
 }
 
 func (r Runner) positionFinding(ctx context.Context, finding agent.Finding, file gitdiff.FileDiff, values map[string]string, usage *agent.TokenUsage, allowRelocation bool) (agent.Finding, bool, string) {

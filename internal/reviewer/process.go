@@ -70,6 +70,14 @@ func (r *processRecorder) beginModelResponse(stage, file string, attempt int) pe
 	return pendingModelResponse{id: id, stage: stage, file: file, attempt: attempt, startedAt: now}
 }
 
+func (r *processRecorder) recordModelError(stage, file string, attempt int, startedAt time.Time, response protocol.Response, err error) {
+	r.mu.Lock()
+	r.nextModelResponseID++
+	id := r.nextModelResponseID
+	r.mu.Unlock()
+	r.finishModelResponse(pendingModelResponse{id: id, stage: stage, file: file, attempt: attempt, startedAt: startedAt}, response, err)
+}
+
 func (r *processRecorder) finishModelResponse(p pendingModelResponse, response protocol.Response, err error) {
 	record := agent.ModelResponse{
 		ID: fmt.Sprintf("model-%04d", p.id), Stage: p.stage, File: p.file, Attempt: p.attempt,
