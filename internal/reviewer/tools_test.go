@@ -37,6 +37,33 @@ func TestReadOnlyToolsAndPathBoundary(t *testing.T) {
 	}
 }
 
+func TestCodeSearchSupportsFixedStringAlternativesAndLiteralPipes(t *testing.T) {
+	root := t.TempDir()
+	content := "package p\nfunc PublishAIReviewReport() {}\nfunc UpsertAIReviewComment() {}\nconst expression = left | right\nfunc formatAIReviewComment() {}\nconst configName = \"config.json\"\n"
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "init")
+	gitIn(t, root, "add", "main.go")
+	executor := newToolExecutor(root, gitdiff.Request{Mode: gitdiff.ModeWorkspace})
+
+	alternatives := executor.codeSearch(context.Background(), "PublishAIReviewReport|UpsertAIReviewComment", []string{"*.go"}, true, false)
+	if !strings.Contains(alternatives, "2|func PublishAIReviewReport") || !strings.Contains(alternatives, "3|func UpsertAIReviewComment") || !strings.Contains(alternatives, "Match lines: 2") {
+		t.Fatalf("fixed-string alternatives did not use OR semantics:\n%s", alternatives)
+	}
+	literal := executor.codeSearch(context.Background(), `left \| right`, []string{"*.go"}, true, false)
+	if !strings.Contains(literal, "4|const expression = left | right") || !strings.Contains(literal, "Match lines: 1") {
+		t.Fatalf("escaped pipe was not searched literally:\n%s", literal)
+	}
+	regexEscapes := executor.codeSearch(context.Background(), `formatAIReviewComment\(|config\.json`, []string{"*.go"}, true, false)
+	if !strings.Contains(regexEscapes, "5|func formatAIReviewComment") || !strings.Contains(regexEscapes, `6|const configName = "config.json"`) || !strings.Contains(regexEscapes, "Match lines: 2") {
+		t.Fatalf("redundant regex escapes were not normalized in fixed-string mode:\n%s", regexEscapes)
+	}
+	if got := fixedSearchAlternatives(` Foo | Bar | Foo | left \| right | Call\( | config\.json `); len(got) != 5 || got[0] != "Foo" || got[1] != "Bar" || got[2] != "left | right" || got[3] != "Call(" || got[4] != "config.json" {
+		t.Fatalf("unexpected normalized alternatives: %#v", got)
+	}
+}
+
 func TestFileReadRejectsSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.txt")
@@ -101,6 +128,84 @@ func TestToolsReadReviewedCommitSnapshot(t *testing.T) {
 	}
 }
 
+func TestChangedDiffReadBatchesOnlyOtherReviewedFiles(t *testing.T) {
+	current := gitdiff.FileDiff{Path: "main.go"}
+	first := gitdiff.FileDiff{Path: "first.go", Hunks: []gitdiff.Hunk{{
+		OldStart: 1, OldLines: 1, NewStart: 1, NewLines: 1,
+		Lines:        []gitdiff.Line{{Kind: '+', NewLine: 1, Text: "const first = true"}},
+		ChangedLines: map[int]bool{1: true},
+	}}}
+	second := gitdiff.FileDiff{Path: "second.go", Hunks: []gitdiff.Hunk{{
+		OldStart: 2, OldLines: 1, NewStart: 2, NewLines: 1,
+		Lines:        []gitdiff.Line{{Kind: '+', NewLine: 2, Text: "const second = true"}},
+		ChangedLines: map[int]bool{2: true},
+	}}}
+	executor := newToolExecutor(t.TempDir(), gitdiff.Request{Mode: gitdiff.ModeWorkspace}).withChangedDiffs(current.Path, []gitdiff.FileDiff{current, first, second})
+	result := executor.execute(context.Background(), toolAction{Tool: "changed_diff_read", FilePaths: []string{"first.go", "second.go", "first.go"}})
+	if result.Status != "success" || result.Summary != "2 changed diffs read" || strings.Count(result.Output, "==== CHANGED DIFF:") != 2 || !strings.Contains(result.Output, "const first = true") || !strings.Contains(result.Output, "const second = true") {
+		t.Fatalf("unexpected changed diff result: %+v", result)
+	}
+	for _, paths := range [][]string{{"main.go"}, {"missing.go"}, {"../escape.go"}, nil} {
+		got := executor.execute(context.Background(), toolAction{Tool: "changed_diff_read", FilePaths: paths})
+		if got.Status != "error" {
+			t.Fatalf("changed_diff_read accepted invalid paths %v: %+v", paths, got)
+		}
+	}
+}
+
+func TestChangedDiffReadReturnsValidPathsWhenBatchContainsRejectedPaths(t *testing.T) {
+	current := gitdiff.FileDiff{Path: "main.go"}
+	valid := gitdiff.FileDiff{Path: "valid.go", Hunks: []gitdiff.Hunk{{
+		NewStart: 1, NewLines: 1, Lines: []gitdiff.Line{{Kind: '+', NewLine: 1, Text: "const valid = true"}}, ChangedLines: map[int]bool{1: true},
+	}}}
+	executor := newToolExecutor(t.TempDir(), gitdiff.Request{Mode: gitdiff.ModeWorkspace}).withChangedDiffs(current.Path, []gitdiff.FileDiff{current, valid})
+	result := executor.execute(context.Background(), toolAction{Tool: "changed_diff_read", FilePaths: []string{"missing.go", "valid.go", "../escape.go", "main.go"}})
+	if result.Status != "success" || result.Summary != "1 changed diffs read" || !strings.Contains(result.Output, "const valid = true") || !strings.Contains(result.Output, `"missing.go": file is not part of the reviewed change`) || !strings.Contains(result.Output, `"../escape.go": invalid repository-relative path`) || !strings.Contains(result.Output, `"main.go": current file diff is already present`) {
+		t.Fatalf("mixed changed-diff batch did not preserve valid results and rejected-path diagnostics: %+v", result)
+	}
+	if !executor.changedDiffsRead["valid.go"] {
+		t.Fatal("valid path was not marked as read after partial success")
+	}
+}
+
+func TestChangedDiffReadOnlyInjectsEachPathOncePerSession(t *testing.T) {
+	current := gitdiff.FileDiff{Path: "main.go"}
+	first := gitdiff.FileDiff{Path: "first.go", Hunks: []gitdiff.Hunk{{
+		NewStart: 1, NewLines: 1, Lines: []gitdiff.Line{{Kind: '+', NewLine: 1, Text: "const first = true"}}, ChangedLines: map[int]bool{1: true},
+	}}}
+	second := gitdiff.FileDiff{Path: "second.go", Hunks: []gitdiff.Hunk{{
+		NewStart: 1, NewLines: 1, Lines: []gitdiff.Line{{Kind: '+', NewLine: 1, Text: "const second = true"}}, ChangedLines: map[int]bool{1: true},
+	}}}
+	executor := newToolExecutor(t.TempDir(), gitdiff.Request{Mode: gitdiff.ModeWorkspace}).withChangedDiffs(current.Path, []gitdiff.FileDiff{current, first, second})
+	firstResult := executor.execute(context.Background(), toolAction{Tool: "changed_diff_read", FilePaths: []string{"first.go"}})
+	if firstResult.Status != "success" || !strings.Contains(firstResult.Output, "const first = true") {
+		t.Fatalf("first diff read failed: %+v", firstResult)
+	}
+	secondResult := executor.execute(context.Background(), toolAction{Tool: "changed_diff_read", FilePaths: []string{"first.go", "second.go"}})
+	if secondResult.Status != "success" || strings.Contains(secondResult.Output, "const first = true") || !strings.Contains(secondResult.Output, "const second = true") || secondResult.Summary != "1 changed diffs read" {
+		t.Fatalf("overlapping request did not return only the unread path: %+v", secondResult)
+	}
+	repeated := executor.execute(context.Background(), toolAction{Tool: "changed_diff_read", FilePaths: []string{"first.go", "second.go"}})
+	if repeated.Status != "success" || !strings.Contains(repeated.Output, "already provided") || executor.hasUnreadChangedDiffs() {
+		t.Fatalf("repeated paths should not be injected again: %+v", repeated)
+	}
+}
+
+func TestChangedDiffReadHasCumulativeSessionLimit(t *testing.T) {
+	current := gitdiff.FileDiff{Path: "main.go"}
+	large := gitdiff.FileDiff{Path: "large.go", Hunks: []gitdiff.Hunk{{
+		NewStart: 1, NewLines: 1, Lines: []gitdiff.Line{{Kind: '+', NewLine: 1, Text: strings.Repeat("x", maxChangedDiffSessionBytes*2)}}, ChangedLines: map[int]bool{1: true},
+	}}}
+	other := gitdiff.FileDiff{Path: "other.go", Hunks: []gitdiff.Hunk{{
+		NewStart: 1, NewLines: 1, Lines: []gitdiff.Line{{Kind: '+', NewLine: 1, Text: "const other = true"}}, ChangedLines: map[int]bool{1: true},
+	}}}
+	executor := newToolExecutor(t.TempDir(), gitdiff.Request{Mode: gitdiff.ModeWorkspace}).withChangedDiffs(current.Path, []gitdiff.FileDiff{current, large, other})
+	result := executor.execute(context.Background(), toolAction{Tool: "changed_diff_read", FilePaths: []string{"large.go", "other.go"}})
+	if result.Status != "success" || !result.Truncated || executor.changedDiffBytes != maxChangedDiffSessionBytes || executor.hasUnreadChangedDiffs() || strings.Contains(result.Output, "const other = true") {
+		t.Fatalf("cumulative changed-diff limit was not enforced: result=%+v bytes=%d", result, executor.changedDiffBytes)
+	}
+}
+
 func TestCodeCommentCategoryUsesClosedEnum(t *testing.T) {
 	definitions, err := loadToolDefinitions()
 	if err != nil {
@@ -130,9 +235,35 @@ func TestCodeCommentCategoryUsesClosedEnum(t *testing.T) {
 		if !ok || len(values) != 6 {
 			t.Fatalf("category must use the six-value enum: %+v", category)
 		}
+		findings, ok := properties["findings"].(map[string]any)
+		if !ok || findings["minItems"] != float64(1) || findings["maxItems"] != float64(10) {
+			t.Fatalf("code_comment findings must support bounded batching: %+v", findings)
+		}
 		return
 	}
 	t.Fatal("code_comment tool definition missing")
+}
+
+func TestChangedDiffReadToolDefinitionIsBounded(t *testing.T) {
+	definitions, err := loadToolDefinitions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range definitions {
+		if definition.Name != "changed_diff_read" {
+			continue
+		}
+		properties, ok := definition.Parameters["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("changed_diff_read properties missing: %+v", definition.Parameters)
+		}
+		paths, ok := properties["file_paths"].(map[string]any)
+		if !ok || paths["minItems"] != float64(1) || paths["maxItems"] != float64(10) {
+			t.Fatalf("changed_diff_read file_paths must be bounded: %+v", paths)
+		}
+		return
+	}
+	t.Fatal("changed_diff_read tool definition missing")
 }
 
 func gitIn(t *testing.T, root string, args ...string) {

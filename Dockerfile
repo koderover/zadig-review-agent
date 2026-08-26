@@ -42,6 +42,12 @@ LABEL org.opencontainers.image.title="zadig-review-agent" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
+RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories && \
+    apk add tzdata && \
+    cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
+    echo Asia/Shanghai  > /etc/timezone && \
+    apk del tzdata
+
 RUN apk add --no-cache bash ca-certificates git \
     && mkdir -p /root/.zadig-review-agent /root/.ssh /workspace /tmp \
     && chmod 0700 /root/.ssh \

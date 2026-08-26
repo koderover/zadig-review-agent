@@ -133,7 +133,7 @@ func TestMainLoopCompressesBeforeHardTokenGuard(t *testing.T) {
 		DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace},
 	}
 	var usage agent.TokenUsage
-	findings, warnings, err := r.runMainLoop(context.Background(), gitdiff.FileDiff{Path: "main.go"}, values, 100, &usage)
+	findings, warnings, err := r.runMainLoop(context.Background(), gitdiff.FileDiff{Path: "main.go"}, nil, values, 100, &usage)
 	if err != nil || len(findings) != 0 || len(warnings) != 0 {
 		t.Fatalf("unexpected loop result: findings=%+v warnings=%+v err=%v", findings, warnings, err)
 	}
@@ -146,6 +146,72 @@ func TestMainLoopCompressesBeforeHardTokenGuard(t *testing.T) {
 	process := r.process.snapshot()
 	if len(process.Compressions) != 1 || process.Compressions[0].Status != "success" || usage.LLMRequests != 3 {
 		t.Fatalf("compression process or usage missing: process=%+v usage=%+v", process, usage)
+	}
+}
+
+func TestMainLoopSkipsCompressionWhileConvergingOrFinalizing(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		hardLimit  int
+		ratio      float64
+		wantPrompt string
+	}{
+		{name: "converging", hardLimit: 4, ratio: 0.25, wantPrompt: "Converge now"},
+		{name: "finalizing", hardLimit: 1, ratio: 0.7, wantPrompt: "context tool budget is exhausted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			var content strings.Builder
+			for index := 0; index < 500; index++ {
+				content.WriteString(strings.Repeat("x", 100))
+				content.WriteByte('\n')
+			}
+			if err := os.WriteFile(filepath.Join(root, "dep.go"), []byte(content.String()), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			values := map[string]string{
+				"current_file_path": "main.go", "change_files": "", "system_rule": "review correctness",
+				"diff": "@@ -1 +1 @@\n-old\n+new", "language": "Chinese", "plan_guidance": "none",
+			}
+			initialMessages, err := loadPromptMessages("main", values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			definitions, err := loadToolDefinitions()
+			if err != nil {
+				t.Fatal(err)
+			}
+			readOutput := newToolExecutor(root, gitdiff.Request{Mode: gitdiff.ModeWorkspace}).fileRead(context.Background(), "dep.go", 1, 500)
+			followupMessages := append(append([]protocol.Message(nil), initialMessages...),
+				protocol.Message{Role: protocol.RoleAssistant, ToolCalls: []protocol.ToolCall{{ID: "read", Name: "file_read", Arguments: `{"file_path":"dep.go","start_line":1,"end_line":500}`}}},
+				protocol.Message{Role: protocol.RoleTool, ToolCallID: "read", ToolName: "file_read", Content: readOutput},
+			)
+			followupTools := definitions
+			if test.hardLimit == 1 {
+				followupTools = finalizationTools(definitions)
+			}
+			followupTokens := estimateRequestTokens(protocol.Request{Messages: followupMessages, Tools: followupTools, RequireTool: true})
+			cfg := config.Default()
+			// Put the follow-up between the 60% compression threshold and the
+			// 80% hard guard. Convergence should send it directly instead of
+			// spending a separate request on an opportunistic summary.
+			cfg.Review.MaxChunkTokens = followupTokens * 10 / 7
+			cfg.Review.MaxContextToolCalls = test.hardLimit
+			cfg.Review.ContextConvergenceRatio = test.ratio
+			llm := &recordingLLM{responses: []protocol.Response{
+				toolResponse("read", "file_read", `{"file_path":"dep.go","start_line":1,"end_line":500}`),
+				doneResponse(),
+			}}
+			r := Runner{Root: root, Config: cfg, LLM: llm, process: newProcessRecorder(time.Now()), DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}}
+			var usage agent.TokenUsage
+			findings, warnings, err := r.runMainLoop(context.Background(), gitdiff.FileDiff{Path: "main.go"}, nil, values, 100, &usage)
+			if err != nil || len(findings) != 0 || len(warnings) != 0 {
+				t.Fatalf("unexpected loop result: findings=%+v warnings=%+v err=%v", findings, warnings, err)
+			}
+			if len(llm.requests) != 2 || !requestContains(llm.requests[1], test.wantPrompt) || len(r.process.snapshot().Compressions) != 0 || usage.LLMRequests != 2 {
+				t.Fatalf("%s request must skip last-moment compression: requests=%+v process=%+v usage=%+v", test.name, llm.requests, r.process.snapshot(), usage)
+			}
+		})
 	}
 }
 

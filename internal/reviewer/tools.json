@@ -14,7 +14,7 @@
   },
   {
     "name": "code_search",
-    "description": "Search tracked repository files. file_patterns are Git pathspecs; use_perl_regexp enables PCRE.",
+    "description": "Search tracked repository files. By default search_text is fixed-string text: an unescaped | separates OR alternatives, \\| searches a literal pipe, and redundant regex escapes such as \\( or \\. are normalized to their literal characters. file_patterns are Git pathspecs; use_perl_regexp enables PCRE instead.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -24,6 +24,22 @@
         "use_perl_regexp": {"type": "boolean"}
       },
       "required": ["search_text"]
+    }
+  },
+  {
+    "name": "changed_diff_read",
+    "description": "Read the supplied diffs for one or more other changed files. Prefer this over repository searches when another changed file may confirm or reject a hypothesis. Valid paths are still returned when a batch also contains rejected paths. Do not request the current file because its diff is already in the review prompt.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "file_paths": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "maxItems": 10
+        }
+      },
+      "required": ["file_paths"]
     }
   },
   {
@@ -40,7 +56,7 @@
   },
   {
     "name": "code_comment",
-    "description": "Record one concrete finding for changed code in the current file.",
+    "description": "Record one or more concrete findings for changed code in the current file. Prefer findings to batch every confirmed issue into one call. Supply exactly one of finding or findings. If file is supplied, it must equal the current reviewed file; findings for context files are rejected.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -61,9 +77,31 @@
             "confidence": {"type": "number", "minimum": 0, "maximum": 1}
           },
           "required": ["severity", "category", "title", "problem", "evidence", "suggestion", "confidence"]
+        },
+        "findings": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+              "category": {"type": "string", "enum": ["correctness", "security", "concurrency", "performance", "compatibility", "tests"]},
+              "rule_id": {"type": "string"},
+              "file": {"type": "string"},
+              "start_line": {"type": "integer"},
+              "end_line": {"type": "integer"},
+              "existing_code": {"type": "string"},
+              "title": {"type": "string"},
+              "problem": {"type": "string"},
+              "evidence": {"type": "string"},
+              "suggestion": {"type": "string"},
+              "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+            },
+            "required": ["severity", "category", "title", "problem", "evidence", "suggestion", "confidence"]
+          }
         }
-      },
-      "required": ["finding"]
+      }
     }
   },
   {

@@ -16,5 +16,22 @@ func loadToolDefinitions() ([]protocol.ToolDefinition, error) {
 	if err := json.Unmarshal(toolDefinitionsJSON, &definitions); err != nil {
 		return nil, fmt.Errorf("load tool definitions: %w", err)
 	}
-	return definitions, nil
+	return terminalToolsFirst(definitions), nil
+}
+
+func terminalToolsFirst(definitions []protocol.ToolDefinition) []protocol.ToolDefinition {
+	ordered := make([]protocol.ToolDefinition, 0, len(definitions))
+	for _, name := range []string{"task_done", "code_comment"} {
+		for _, definition := range definitions {
+			if definition.Name == name {
+				ordered = append(ordered, definition)
+			}
+		}
+	}
+	for _, definition := range definitions {
+		if definition.Name != "task_done" && definition.Name != "code_comment" {
+			ordered = append(ordered, definition)
+		}
+	}
+	return ordered
 }

@@ -122,6 +122,7 @@ func contextToolCacheKey(action toolAction) string {
 	key := struct {
 		Tool          string   `json:"tool"`
 		FilePath      string   `json:"file_path,omitempty"`
+		FilePaths     []string `json:"file_paths,omitempty"`
 		QueryName     string   `json:"query_name,omitempty"`
 		SearchText    string   `json:"search_text,omitempty"`
 		FilePatterns  []string `json:"file_patterns,omitempty"`
@@ -130,7 +131,7 @@ func contextToolCacheKey(action toolAction) string {
 		StartLine     int      `json:"start_line,omitempty"`
 		EndLine       int      `json:"end_line,omitempty"`
 	}{
-		Tool: action.Tool, FilePath: action.filePath(), QueryName: action.queryName(),
+		Tool: action.Tool, FilePath: action.filePath(), FilePaths: action.FilePaths, QueryName: action.queryName(),
 		SearchText: action.searchText(), FilePatterns: action.FilePatterns,
 		CaseSensitive: action.CaseSensitive, UsePerlRegexp: action.UsePerlRegexp,
 		StartLine: action.StartLine, EndLine: action.EndLine,
@@ -193,6 +194,8 @@ func toolArguments(action toolAction) agent.ToolArguments {
 		arguments.FilePath = action.filePath()
 		arguments.StartLine = action.StartLine
 		arguments.EndLine = action.EndLine
+	case "changed_diff_read":
+		arguments.FilePaths = append([]string(nil), action.FilePaths...)
 	case "file_find":
 		arguments.QueryName = action.queryName()
 		arguments.CaseSensitive = action.CaseSensitive
@@ -202,8 +205,11 @@ func toolArguments(action toolAction) agent.ToolArguments {
 		arguments.CaseSensitive = action.CaseSensitive
 		arguments.UsePerlRegexp = action.UsePerlRegexp
 	case "code_comment":
-		finding := action.Finding
-		arguments.Finding = &finding
+		if hasFinding(action.Finding) {
+			finding := action.Finding
+			arguments.Finding = &finding
+		}
+		arguments.Findings = append([]agent.Finding(nil), action.Findings...)
 	}
 	return arguments
 }

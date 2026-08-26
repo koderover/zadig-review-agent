@@ -106,7 +106,9 @@ review:
   context_lines: 3
   max_tool_rounds: 30
   max_context_tool_calls: 10
+  context_convergence_ratio: 0.5
   max_chunk_tokens: 12000
+  max_tokens_budget: 0
   confidence_threshold: 0.75
   fail_on:
     - critical
@@ -226,7 +228,9 @@ Main Loop 只接受官方 SDK 返回的原生 function/tool call，不解析文�
 - Gemini：`functionCallingConfig.mode=ANY`；
 - Anthropic：`tool_choice=any`。
 
-如果模型从未调用过工具，连续三轮仍没有工具调用时记录 `tool_loop_empty_limit_reached`，审查标记为不完整。如果模型已经完成过有效工具活动，后续无工具响应会强制重试一次；重试仍返回空响应，或返回非空自然语言但没有工具调用时，将其视为模型 end turn，避免兼容端点忽略 `tool_choice` 或返回空 completion 时误判失败。达到 `max_tool_rounds` 时记录 `tool_loop_limit_reached`。
+运行时工具顺序将 `task_done`、`code_comment` 放在 Context Tool 之前，与 System Prompt 的完成优先决策一致。当没有具体未决假设时，模型应在同一响应中用一个 `code_comment` 批量提交所有 finding 并调用 `task_done`；没有 finding 时直接调用 `task_done`。普通阶段的 `code_comment` 不再隐式结束审查，其结果会明确提示下一轮在没有未决假设时立即 `task_done`。Finalization 阶段仍把成功的批量评论视为终止，以兼容无法在一个响应中同时产生两个 Tool Call 的模型。若 Finalization 已产生 Tool Call，但参数或 payload 无效，模型会得到且只得到一次仅含终止工具的修复请求；必要时该请求可以比配置的轮次上限多一轮。只有修复仍失败时才产生 `finalization_failed`。
+
+如果模型从未调用过工具，连续三轮仍没有工具调用时记录 `tool_loop_empty_limit_reached`，审查标记为不完整。如果模型已经完成过有效工具活动，自主选择轮次的无工具响应会强制重试一次；该 required-tool 重试再次不调用工具时，将其视为模型 end turn。收敛请求本身已经是 required-tool 轮次，因此空响应或自然语言响应会立即结束，不再追加一次完整请求。最后一个 `max_tool_rounds` 轮次固定用于收敛，避免最后一轮继续取上下文却没有机会提交结果。
 
 SDK 自带重试关闭。Reviewer 对超时、HTTP 408、429 和 5xx 统一重试一次；认证和参数错误不重试。每个实际请求都计入 `LLM Requests`。
 
@@ -241,23 +245,26 @@ Plan、Main、Relocation 和 Review Filter 分别使用独立 system/user Prompt
 
 单文件 changed lines 达到 50 时执行无工具 Plan；小于 50 行时跳过。大 hunk 根据 `max_chunk_tokens` 分片。每次模型请求前执行约 80% 的本地 token guard；该 guard 是粗略容量保护，正式 Usage 以 Provider 响应为准。
 
-每个文件默认最多执行 10 次 `file_read`、`code_search` 或 `file_find`，由 `review.max_context_tool_calls` 或 `--max-context-tool-calls` 调整。该值是上限：不超过 10 行的变更最多使用 6 次，11 至 50 行最多使用 8 次，更大变更使用配置上限。预算耗尽后，下一轮只向模型暴露 `code_comment` 和 `task_done` 并强制进入收敛阶段，避免小 diff 因重复搜索产生大量 Tool Calls 和 Token 消耗。
+每个文件默认最多执行 10 次 `file_read`、`changed_diff_read`、`code_search` 或 `file_find`，由 `review.max_context_tool_calls` 或 `--max-context-tool-calls` 调整。该值是硬上限：不超过 10 行的变更最多使用 6 次，11 至 50 行最多使用 8 次，更大变更使用配置上限。软收敛阈值为 `ceil(有效硬上限 × review.context_convergence_ratio)`；默认比例为 `0.5`，也可通过 `--context-convergence-ratio` 设置。模型最多再执行一轮批量 Context Tool 调用，随后必须提交 finding 或结束。这会在有效预算使用过半时开始收敛，减少低收益的探索调用，同时仍保留最后一轮取证机会。`changed_diff_read` 即使批量读取多个路径也只计一次 Context Tool Call。Finalization 只向模型暴露 `task_done` 和 `code_comment`。
+
+`review.max_tokens_budget`（或 `--max-tokens-budget`）限制整次审查的 Input + Output Token；`0` 表示无限制。调度每个文件/chunk 前，调度器会按 OCR 的方式预留该项估算成本；如果已承诺成本加下一项估算将超过预算，就停止调度后续项。已经开始的任务允许完成。部分结果会标记为 incomplete，并通过 `token_budget_reached` 指明第一个跳过的 chunk。
 
 原生工具定义位于 `internal/reviewer/tools.json`：
 
 - `file_read`：从 post-change snapshot 读取最多 500 行；
-- `code_search`：通过 `git grep` 搜索 tracked files，支持 Git pathspec、大小写和 PCRE；
+- `code_search`：通过 `git grep` 搜索 tracked files，支持 Git pathspec、大小写和 PCRE；默认固定字符串模式下，未转义的 `|` 分隔 OR 候选，`\|` 搜索字面管道符，`\(`、`\.` 等多余正则转义会还原为字面字符；
+- `changed_diff_read`：一次读取本次审查集合中最多 10 个其他 changed file 的 diff；批次中即使包含当前文件、非法路径或集合外路径，仍返回全部合法路径的 diff，并在结果中列出被拒路径；每个合法路径在单文件/chunk 会话中最多注入一次，累计最多 32 KiB；
 - `file_find`：按 basename 关键字查找文件，不是 glob；
-- `code_comment`：提交一个当前文件的候选 finding；
+- `code_comment`：一次批量提交最多 10 个当前文件的候选 finding，同时兼容旧的单个 `finding` 参数；省略 `file` 时归属当前文件，非空但指向其他文件时拒绝，混合批次仍保留其中合法的当前文件 finding；
 - `task_done`：明确结束当前文件审查。
 
 每轮 assistant tool calls 和所有对应 tool results 都保留在下一次请求中。工具输出最大 32 KiB，截断时保持有效 UTF-8。
 
-单个文件/chunk 会话内对参数完全相同的 `file_read`、`code_search` 和 `file_find` 调用做确定性去重；`file_read` 请求的行区间已被此前读取范围完整覆盖时也会命中缓存。缓存命中不重复执行、不消耗 Context Tool Budget，并重新注入真实缓存内容，确保上下文压缩后仍可使用。`code_search` 定位符号后再用 `file_read` 获取上下文属于不同操作，不会被去重。不同文件 subtask 的上下文彼此独立，不共享工具结果缓存。
+单个文件/chunk 会话内对参数完全相同的 `file_read`、`code_search` 和 `file_find` 调用做确定性去重；`file_read` 请求的行区间已被此前读取范围完整覆盖时也会命中缓存。缓存命中不重复执行、不消耗 Context Tool Budget，并重新注入真实缓存内容，确保上下文压缩后仍可使用。`changed_diff_read` 使用更严格的路径级去重：重叠请求只返回尚未提供的路径，全部重复时只返回简短 cached 提示，不再注入 diff；所有路径均已读取或达到累计限额后，后续请求会移除该工具。`code_search` 定位符号后再用 `file_read` 获取上下文属于不同操作，不会被去重。不同文件 subtask 的上下文彼此独立，不共享工具结果缓存。
 
 ### 8.1 上下文压缩
 
-Main Loop 在每次模型请求前估算当前消息和工具定义的 Token。达到 `max_chunk_tokens` 的 60% 且存在可压缩的历史轮次时，执行一次同步 LLM 摘要请求：
+Main Loop 在每次自主选择阶段的模型请求前估算当前消息和工具定义的 Token。达到 `max_chunk_tokens` 的 60% 且存在可压缩的历史轮次时，执行一次同步 LLM 摘要请求。收敛请求和 Finalization 请求不再执行这种机会式压缩，因为它们要么已经终止，要么最多只允许最后一轮取证：
 
 - system message 和初始 user message 固定保留；
 - 较旧的完整 assistant/tool 轮次进入摘要；
@@ -273,7 +280,7 @@ Commit/Range 模式的 `file_read` 从被审查 ref 读取，Workspace 模式读
 
 ## 9. Finding 验证
 
-`code_comment` 产生候选 finding：
+`code_comment` 通过单个 `finding` 或最多 10 项的 `findings` 数组产生候选 finding：
 
 ```json
 {
@@ -299,13 +306,14 @@ Review Filter 完成后，如果输出语言不是 English，Reviewer 使用独�
 处理顺序：
 
 1. 优先用 `existing_code` 在新侧 hunk 中进行精确连续片段定位；
-2. 已有行号与 changed line 重叠时直接接受位置；
-3. 无法定位时调用 Relocation，返回新的精确 `existing_code`；仍无法定位的单个候选会被丢弃，但不会使整个 review 变为不完整；
-4. 为候选分配 `c-0`、`c-1` 等稳定临时 ID；
-5. Review Filter 只返回需要删除的 ID；
-6. Filter 只有在 diff 提供直接反证时才应删除，不能改写 finding；
-7. Filter 超时或响应非法时保留原 findings、记录 warning，并将审查标记为不完整；
-8. 最终再次校验 changed line、严重程度、置信度和路径，然后生成 fingerprint、去重并聚合。
+2. 非空 `existing_code` 无法匹配当前 diff 时，不再相信碰巧与 changed line 重叠的行号；若该片段明确存在于其他 changed file，直接丢弃且不调用 Relocation；
+3. 仅当 `existing_code` 为空时，已有行号与 changed line 重叠才直接接受位置；
+4. 无法定位时调用 Relocation，返回新的精确 `existing_code`；响应 JSON 非法时追加一次严格格式修复请求，JSON 合法但片段仍无法定位时只丢弃该候选；
+5. 为候选分配 `c-0`、`c-1` 等稳定临时 ID；
+6. Review Filter 只返回需要删除的 ID；
+7. Filter 只有在 diff 提供直接反证时才应删除，不能改写 finding；
+8. Filter 超时或响应非法时保留原 findings、记录 warning，并将审查标记为不完整；
+9. 最终再次校验 changed line、严重程度、置信度和路径，然后生成 fingerprint、去重并聚合。
 
 允许的 severity 为 `critical`、`high`、`medium`、`low`。低于 `confidence_threshold` 的 finding 被丢弃。质量门禁只由本地 `fail_on` 策略决定。
 

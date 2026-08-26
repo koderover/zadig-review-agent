@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/koderover/zadig-review-agent/internal/agent"
@@ -106,6 +107,7 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 		workers = 1
 	}
 	var wg sync.WaitGroup
+	var budgetCommitted atomic.Int64
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -114,6 +116,9 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 				started := time.Now()
 				r.trace("Reviewing %d/%d: %s", job.index, job.total, job.file.Path)
 				findings, usage, warnings, err := r.reviewFile(ctx, job.file, job.rule, filtered.Kept)
+				if job.estimatedTokens > 0 {
+					budgetCommitted.Add(usage.TotalTokens - job.estimatedTokens)
+				}
 				r.trace("%scompleted: %d finding(s) (%s)", r.progressFilePrefix(job.file.Path), len(findings), time.Since(started).Round(time.Millisecond))
 				results <- chunkResult{findings: findings, rule: job.ruleMeta, usage: usage, warnings: warnings, err: err}
 			}
@@ -123,21 +128,37 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 	loop:
 		for index, chunk := range chunks {
 			resolved := r.RuleResolver.Resolve(chunk.Path)
+			ruleMeta := agent.ResolvedRule{
+				File:       chunk.Path,
+				Source:     resolved.Source,
+				SourcePath: resolved.SourcePath,
+				Pattern:    resolved.Pattern,
+				Digest:     resolved.Digest,
+			}
+			if budget := r.Config.Review.MaxTokensBudget; budget > 0 {
+				nextEstimate := estimateReviewChunkTokens(chunk)
+				committed := budgetCommitted.Load()
+				if committed+nextEstimate > budget {
+					warning := fmt.Sprintf("token_budget_reached: %s: committed %d + next chunk estimate %d exceeds budget %d; skipped this and remaining chunks", chunk.Path, committed, nextEstimate, budget)
+					r.trace("Token budget reached before %s (%d committed + %d estimated > %d); stopping dispatch", chunk.Path, committed, nextEstimate, budget)
+					results <- chunkResult{rule: ruleMeta, warnings: []string{warning}}
+					break loop
+				}
+				budgetCommitted.Add(nextEstimate)
+			}
 			select {
 			case <-ctx.Done():
+				if estimate := estimateReviewChunkTokensIfBudgeted(r.Config.Review.MaxTokensBudget, chunk); estimate > 0 {
+					budgetCommitted.Add(-estimate)
+				}
 				break loop
 			case jobs <- reviewJob{
-				file:  chunk,
-				index: index + 1,
-				total: len(chunks),
-				rule:  resolved,
-				ruleMeta: agent.ResolvedRule{
-					File:       chunk.Path,
-					Source:     resolved.Source,
-					SourcePath: resolved.SourcePath,
-					Pattern:    resolved.Pattern,
-					Digest:     resolved.Digest,
-				},
+				file:            chunk,
+				index:           index + 1,
+				total:           len(chunks),
+				rule:            resolved,
+				ruleMeta:        ruleMeta,
+				estimatedTokens: estimateReviewChunkTokensIfBudgeted(r.Config.Review.MaxTokensBudget, chunk),
 			}:
 			}
 		}
@@ -220,14 +241,37 @@ func (r Runner) trace(format string, args ...any) {
 
 func warningMakesIncomplete(warning string) bool {
 	return strings.HasPrefix(warning, "token_threshold_exceeded:") ||
+		strings.HasPrefix(warning, "token_budget_reached:") ||
 		strings.HasPrefix(warning, "context_request_ignored_at_limit:") ||
 		strings.HasPrefix(warning, "tool_loop_empty_limit_reached:") ||
 		strings.HasPrefix(warning, "tool_loop_limit_reached:") ||
+		strings.HasPrefix(warning, "finalization_failed:") ||
 		strings.HasPrefix(warning, "review_filter_failed:") ||
 		strings.HasPrefix(warning, "review_filter_invalid_response:") ||
 		strings.HasPrefix(warning, "finding_localization_failed:") ||
 		strings.HasPrefix(warning, "relocation_failed:") ||
 		strings.HasPrefix(warning, "relocation_invalid_response:")
+}
+
+func estimateReviewChunkTokens(file gitdiff.FileDiff) int64 {
+	const (
+		promptOverheadTokens     = 2000
+		averageMainRounds        = 7
+		averageOutputTokensRound = 700
+	)
+	diffTokens := estimateTokens(renderFileDiff(file))
+	total := int64((diffTokens+promptOverheadTokens)*averageMainRounds + averageOutputTokensRound*averageMainRounds)
+	if file.Insertions+file.Deletions >= planLineThreshold {
+		total += int64(diffTokens + promptOverheadTokens + 400)
+	}
+	return total
+}
+
+func estimateReviewChunkTokensIfBudgeted(budget int64, file gitdiff.FileDiff) int64 {
+	if budget <= 0 {
+		return 0
+	}
+	return estimateReviewChunkTokens(file)
 }
 
 type chunkResult struct {
@@ -255,11 +299,12 @@ func repositoryPath(root string) string {
 }
 
 type reviewJob struct {
-	file     gitdiff.FileDiff
-	index    int
-	total    int
-	rule     rules.ResolvedRule
-	ruleMeta agent.ResolvedRule
+	file            gitdiff.FileDiff
+	index           int
+	total           int
+	rule            rules.ResolvedRule
+	ruleMeta        agent.ResolvedRule
+	estimatedTokens int64
 }
 
 func (r Runner) reviewFile(ctx context.Context, file gitdiff.FileDiff, rule rules.ResolvedRule, allFiles []gitdiff.FileDiff) ([]agent.Finding, agent.TokenUsage, []string, error) {

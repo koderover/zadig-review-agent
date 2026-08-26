@@ -14,6 +14,8 @@ func TestLoadConfig(t *testing.T) {
 	err := os.WriteFile(path, []byte(`
 review:
   concurrency: 2
+  context_convergence_ratio: 0.8
+  max_tokens_budget: 50000
   confidence_threshold: 0.9
   fail_on:
     - critical
@@ -36,7 +38,7 @@ output:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Review.Concurrency != 2 || cfg.Output.Language != "en-US" || !cfg.Output.Progress {
+	if cfg.Review.Concurrency != 2 || cfg.Review.ContextConvergenceRatio != 0.8 || cfg.Review.MaxTokensBudget != 50000 || cfg.Output.Language != "en-US" || !cfg.Output.Progress {
 		t.Fatalf("unexpected review config: %+v", cfg.Review)
 	}
 	if cfg.Model.Protocol != "anthropic" || cfg.Model.APIKey != "test-key" {
@@ -50,6 +52,47 @@ func TestProgressEnabledByDefault(t *testing.T) {
 	}
 	if Default().Review.ContextLines != 3 {
 		t.Fatalf("default context lines = %d, want 3", Default().Review.ContextLines)
+	}
+	if Default().Review.ContextConvergenceRatio != 0.5 {
+		t.Fatalf("default convergence ratio = %v, want 0.5", Default().Review.ContextConvergenceRatio)
+	}
+}
+
+func TestContextConvergenceRatioSetGetAndValidation(t *testing.T) {
+	cfg := Default()
+	if err := Set(&cfg, "review.context_convergence_ratio", "0.65"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Get(cfg, "review.context_convergence_ratio")
+	if err != nil || got != "0.65" {
+		t.Fatalf("unexpected convergence ratio %q: %v", got, err)
+	}
+	if !strings.Contains(Render(cfg), "context_convergence_ratio: 0.65") {
+		t.Fatalf("render omitted convergence ratio:\n%s", Render(cfg))
+	}
+	for _, value := range []string{"0", "-0.1", "1.1", "invalid"} {
+		if err := Set(&cfg, "review.context_convergence_ratio", value); err == nil {
+			t.Fatalf("expected invalid convergence ratio %q to fail", value)
+		}
+	}
+}
+
+func TestMaxTokensBudgetSetGetAndValidation(t *testing.T) {
+	cfg := Default()
+	if err := Set(&cfg, "review.max_tokens_budget", "50000"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Get(cfg, "review.max_tokens_budget")
+	if err != nil || got != "50000" {
+		t.Fatalf("unexpected token budget %q: %v", got, err)
+	}
+	if !strings.Contains(Render(cfg), "max_tokens_budget: 50000") {
+		t.Fatalf("render omitted token budget:\n%s", Render(cfg))
+	}
+	for _, value := range []string{"-1", "invalid"} {
+		if err := Set(&cfg, "review.max_tokens_budget", value); err == nil {
+			t.Fatalf("expected invalid token budget %q to fail", value)
+		}
 	}
 }
 

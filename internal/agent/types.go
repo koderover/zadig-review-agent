@@ -90,15 +90,17 @@ type ToolCall struct {
 }
 
 type ToolArguments struct {
-	FilePath      string   `json:"file_path,omitempty"`
-	QueryName     string   `json:"query_name,omitempty"`
-	SearchText    string   `json:"search_text,omitempty"`
-	FilePatterns  []string `json:"file_patterns,omitempty"`
-	CaseSensitive bool     `json:"case_sensitive,omitempty"`
-	UsePerlRegexp bool     `json:"use_perl_regexp,omitempty"`
-	StartLine     int      `json:"start_line,omitempty"`
-	EndLine       int      `json:"end_line,omitempty"`
-	Finding       *Finding `json:"finding,omitempty"`
+	FilePath      string    `json:"file_path,omitempty"`
+	FilePaths     []string  `json:"file_paths,omitempty"`
+	QueryName     string    `json:"query_name,omitempty"`
+	SearchText    string    `json:"search_text,omitempty"`
+	FilePatterns  []string  `json:"file_patterns,omitempty"`
+	CaseSensitive bool      `json:"case_sensitive,omitempty"`
+	UsePerlRegexp bool      `json:"use_perl_regexp,omitempty"`
+	StartLine     int       `json:"start_line,omitempty"`
+	EndLine       int       `json:"end_line,omitempty"`
+	Finding       *Finding  `json:"finding,omitempty"`
+	Findings      []Finding `json:"findings,omitempty"`
 }
 
 type TokenUsage struct {

@@ -301,45 +301,49 @@ func TestConfigSetHelpListsKeys(t *testing.T) {
 func TestApplyCLIOverrides(t *testing.T) {
 	cfg := config.Default()
 	visited := map[string]bool{
-		"concurrency":            true,
-		"context-lines":          true,
-		"max-tool-rounds":        true,
-		"max-context-tool-calls": true,
-		"max-chunk-tokens":       true,
-		"confidence-threshold":   true,
-		"fail-on":                true,
-		"language":               true,
-		"model-protocol":         true,
-		"model-name":             true,
-		"model-endpoint":         true,
-		"model-timeout":          true,
-		"output-json":            true,
-		"output-md":              true,
-		"console":                true,
-		"progress":               true,
+		"concurrency":               true,
+		"context-lines":             true,
+		"max-tool-rounds":           true,
+		"max-context-tool-calls":    true,
+		"context-convergence-ratio": true,
+		"max-chunk-tokens":          true,
+		"max-tokens-budget":         true,
+		"confidence-threshold":      true,
+		"fail-on":                   true,
+		"language":                  true,
+		"model-protocol":            true,
+		"model-name":                true,
+		"model-endpoint":            true,
+		"model-timeout":             true,
+		"output-json":               true,
+		"output-md":                 true,
+		"console":                   true,
+		"progress":                  true,
 	}
 	err := applyCLIOverrides(&cfg, visited, cliOverrides{
-		concurrency:         8,
-		contextLines:        12,
-		maxToolRounds:       3,
-		maxContextToolCalls: 7,
-		maxChunkTokens:      2000,
-		confidenceThreshold: 0.6,
-		failOn:              "critical,medium",
-		language:            "en-US",
-		modelProtocol:       "anthropic",
-		modelName:           "claude-test",
-		modelEndpoint:       "https://example.test/v1/",
-		modelTimeout:        "45s",
-		jsonOut:             "out.json",
-		mdOut:               "out.md",
-		console:             "none",
-		progress:            true,
+		concurrency:             8,
+		contextLines:            12,
+		maxToolRounds:           3,
+		maxContextToolCalls:     7,
+		contextConvergenceRatio: 0.7,
+		maxChunkTokens:          2000,
+		maxTokensBudget:         50000,
+		confidenceThreshold:     0.6,
+		failOn:                  "critical,medium",
+		language:                "en-US",
+		modelProtocol:           "anthropic",
+		modelName:               "claude-test",
+		modelEndpoint:           "https://example.test/v1/",
+		modelTimeout:            "45s",
+		jsonOut:                 "out.json",
+		mdOut:                   "out.md",
+		console:                 "none",
+		progress:                true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Review.Concurrency != 8 || cfg.Review.ContextLines != 12 || cfg.Review.MaxToolRounds != 3 || cfg.Review.MaxContextToolCalls != 7 || cfg.Review.MaxChunkTokens != 2000 || cfg.Review.ConfidenceThreshold != 0.6 || cfg.Output.Language != "en-US" {
+	if cfg.Review.Concurrency != 8 || cfg.Review.ContextLines != 12 || cfg.Review.MaxToolRounds != 3 || cfg.Review.MaxContextToolCalls != 7 || cfg.Review.ContextConvergenceRatio != 0.7 || cfg.Review.MaxChunkTokens != 2000 || cfg.Review.MaxTokensBudget != 50000 || cfg.Review.ConfidenceThreshold != 0.6 || cfg.Output.Language != "en-US" {
 		t.Fatalf("review overrides failed: %+v", cfg.Review)
 	}
 	if strings.Join(cfg.Review.FailOn, ",") != "critical,medium" {
@@ -361,6 +365,22 @@ func TestApplyCLIProgressFalseOverridesConfig(t *testing.T) {
 	}
 	if cfg.Output.Progress {
 		t.Fatal("expected --progress=false to disable configured progress")
+	}
+}
+
+func TestApplyCLIOverridesRejectsInvalidConvergenceRatio(t *testing.T) {
+	cfg := config.Default()
+	for _, ratio := range []float64{0, -0.1, 1.1} {
+		if err := applyCLIOverrides(&cfg, map[string]bool{"context-convergence-ratio": true}, cliOverrides{contextConvergenceRatio: ratio}); err == nil {
+			t.Fatalf("expected invalid convergence ratio %v to fail", ratio)
+		}
+	}
+}
+
+func TestApplyCLIOverridesRejectsNegativeTokenBudget(t *testing.T) {
+	cfg := config.Default()
+	if err := applyCLIOverrides(&cfg, map[string]bool{"max-tokens-budget": true}, cliOverrides{maxTokensBudget: -1}); err == nil {
+		t.Fatal("expected negative token budget to fail")
 	}
 }
 

@@ -3,7 +3,9 @@ review:
   context_lines: 3
   max_tool_rounds: 30
   max_context_tool_calls: 10
+  context_convergence_ratio: 0.5
   max_chunk_tokens: 12000
+  max_tokens_budget: 0
   confidence_threshold: 0.75
   fail_on:
     - critical

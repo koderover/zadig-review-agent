@@ -17,27 +17,35 @@ import (
 )
 
 type toolAction struct {
-	Tool          string        `json:"tool"`
-	FilePath      string        `json:"file_path,omitempty"`
-	QueryName     string        `json:"query_name,omitempty"`
-	SearchText    string        `json:"search_text,omitempty"`
-	FilePatterns  []string      `json:"file_patterns,omitempty"`
-	CaseSensitive bool          `json:"case_sensitive,omitempty"`
-	UsePerlRegexp bool          `json:"use_perl_regexp,omitempty"`
-	StartLine     int           `json:"start_line,omitempty"`
-	EndLine       int           `json:"end_line,omitempty"`
-	Finding       agent.Finding `json:"finding,omitempty"`
-	Path          string        `json:"path,omitempty"`
-	Query         string        `json:"query,omitempty"`
-	Pattern       string        `json:"pattern,omitempty"`
+	Tool          string          `json:"tool"`
+	FilePath      string          `json:"file_path,omitempty"`
+	FilePaths     []string        `json:"file_paths,omitempty"`
+	QueryName     string          `json:"query_name,omitempty"`
+	SearchText    string          `json:"search_text,omitempty"`
+	FilePatterns  []string        `json:"file_patterns,omitempty"`
+	CaseSensitive bool            `json:"case_sensitive,omitempty"`
+	UsePerlRegexp bool            `json:"use_perl_regexp,omitempty"`
+	StartLine     int             `json:"start_line,omitempty"`
+	EndLine       int             `json:"end_line,omitempty"`
+	Finding       agent.Finding   `json:"finding,omitempty"`
+	Findings      []agent.Finding `json:"findings,omitempty"`
+	Path          string          `json:"path,omitempty"`
+	Query         string          `json:"query,omitempty"`
+	Pattern       string          `json:"pattern,omitempty"`
 }
 
 type toolExecutor struct {
-	root string
-	ref  string
+	root                 string
+	ref                  string
+	currentFile          string
+	changedDiffs         map[string]gitdiff.FileDiff
+	changedDiffsRead     map[string]bool
+	changedDiffBytes     int
+	changedDiffTruncated bool
 }
 
 const maxToolOutputBytes = 32 * 1024
+const maxChangedDiffSessionBytes = maxToolOutputBytes
 
 type toolExecution struct {
 	Output      string
@@ -59,11 +67,24 @@ func newToolExecutor(root string, request gitdiff.Request) toolExecutor {
 	return toolExecutor{root: root, ref: ref}
 }
 
-func (e toolExecutor) execute(ctx context.Context, action toolAction) toolExecution {
+func (e toolExecutor) withChangedDiffs(currentFile string, files []gitdiff.FileDiff) toolExecutor {
+	e.currentFile = currentFile
+	e.changedDiffs = make(map[string]gitdiff.FileDiff, len(files))
+	e.changedDiffsRead = make(map[string]bool, len(files))
+	for _, file := range files {
+		e.changedDiffs[file.Path] = file
+	}
+	return e
+}
+
+func (e *toolExecutor) execute(ctx context.Context, action toolAction) toolExecution {
 	var output string
 	switch action.Tool {
 	case "file_read":
 		output = e.fileRead(ctx, action.filePath(), action.StartLine, action.EndLine)
+	case "changed_diff_read":
+		e.changedDiffTruncated = false
+		output = e.changedDiffRead(action.FilePaths)
 	case "code_search":
 		output = e.codeSearch(ctx, action.searchText(), action.FilePatterns, action.CaseSensitive, action.UsePerlRegexp)
 	case "file_find":
@@ -73,6 +94,7 @@ func (e toolExecutor) execute(ctx context.Context, action toolAction) toolExecut
 	}
 	originalBytes := len(output)
 	output, truncated := truncateToolOutput(output, maxToolOutputBytes)
+	truncated = truncated || e.changedDiffTruncated
 	status := "success"
 	if strings.HasPrefix(output, "error:") {
 		status = "error"
@@ -132,6 +154,8 @@ func summarizeToolOutput(tool, output string) string {
 		return fmt.Sprintf("%d files", lineCount)
 	case "file_read":
 		return fmt.Sprintf("%d lines read", readLineCount(trimmed))
+	case "changed_diff_read":
+		return fmt.Sprintf("%d changed diffs read", strings.Count(trimmed, "==== CHANGED DIFF: "))
 	}
 	firstLine := trimmed
 	if index := strings.IndexByte(firstLine, '\n'); index >= 0 {
@@ -144,6 +168,129 @@ func summarizeToolOutput(tool, output string) string {
 		return firstLine
 	}
 	return fmt.Sprintf("%s (%d lines)", firstLine, lineCount)
+}
+
+func (e *toolExecutor) changedDiffRead(paths []string) string {
+	if len(paths) == 0 {
+		return "error: file_paths must contain at least one changed file"
+	}
+	if len(paths) > 10 {
+		return "error: file_paths may contain at most 10 changed files"
+	}
+	seen := make(map[string]bool, len(paths))
+	cleanPaths := make([]string, 0, len(paths))
+	rejected := make([]string, 0)
+	for _, path := range paths {
+		clean, ok := filter.CleanRelative(path)
+		if !ok {
+			rejected = append(rejected, fmt.Sprintf("%q: invalid repository-relative path", path))
+			continue
+		}
+		if clean == e.currentFile {
+			rejected = append(rejected, fmt.Sprintf("%q: current file diff is already present in the review prompt", clean))
+			continue
+		}
+		if _, ok := e.changedDiffs[clean]; !ok {
+			rejected = append(rejected, fmt.Sprintf("%q: file is not part of the reviewed change", clean))
+			continue
+		}
+		if seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		cleanPaths = append(cleanPaths, clean)
+	}
+	var diffs strings.Builder
+	for _, clean := range cleanPaths {
+		if e.changedDiffsRead[clean] {
+			continue
+		}
+		file := e.changedDiffs[clean]
+		block := fmt.Sprintf("==== CHANGED DIFF: %s ====\n%s", clean, strings.TrimRight(renderFileDiff(file), "\n"))
+		separatorBytes := 0
+		if diffs.Len() > 0 {
+			separatorBytes = 1
+		}
+		remaining := maxChangedDiffSessionBytes - e.changedDiffBytes
+		if remaining <= separatorBytes {
+			e.changedDiffBytes = maxChangedDiffSessionBytes
+			break
+		}
+		if len(block)+separatorBytes > remaining {
+			if separatorBytes > 0 {
+				diffs.WriteByte('\n')
+			}
+			truncated, _ := truncateToolOutput(block, remaining-separatorBytes)
+			diffs.WriteString(truncated)
+			e.changedDiffsRead[clean] = true
+			e.changedDiffBytes = maxChangedDiffSessionBytes
+			e.changedDiffTruncated = true
+			break
+		}
+		if separatorBytes > 0 {
+			diffs.WriteByte('\n')
+		}
+		diffs.WriteString(block)
+		e.changedDiffsRead[clean] = true
+		e.changedDiffBytes += len(block) + separatorBytes
+	}
+	if diffs.Len() == 0 {
+		if len(cleanPaths) == 0 {
+			return "error: no valid changed file paths\n" + formatRejectedChangedDiffPaths(rejected)
+		}
+		output := "all requested valid changed diffs were already provided; no new diff content"
+		if len(rejected) > 0 {
+			output += "\n" + formatRejectedChangedDiffPaths(rejected)
+		}
+		return output
+	}
+	output := ""
+	if len(rejected) > 0 {
+		output = formatRejectedChangedDiffPaths(rejected) + "\n\n"
+	}
+	return output + strings.TrimRight(diffs.String(), "\n")
+}
+
+func formatRejectedChangedDiffPaths(rejected []string) string {
+	if len(rejected) == 0 {
+		return ""
+	}
+	return "Rejected changed diff paths:\n- " + strings.Join(rejected, "\n- ")
+}
+
+func (e *toolExecutor) changedDiffRequestHasUnread(paths []string) bool {
+	if len(paths) == 0 || len(paths) > 10 {
+		return true
+	}
+	for _, path := range paths {
+		clean, ok := filter.CleanRelative(path)
+		if !ok || clean == e.currentFile {
+			return true
+		}
+		if _, ok := e.changedDiffs[clean]; !ok {
+			return true
+		}
+		if !e.changedDiffsRead[clean] && e.changedDiffBytes < maxChangedDiffSessionBytes {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *toolExecutor) hasUnreadChangedDiffs() bool {
+	if e.changedDiffBytes >= maxChangedDiffSessionBytes {
+		return false
+	}
+	for path := range e.changedDiffs {
+		if path != e.currentFile && !e.changedDiffsRead[path] {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *toolExecutor) changedDiffWasUsed() bool {
+	return len(e.changedDiffsRead) > 0
 }
 
 func searchMatchCount(output string) int {
@@ -240,10 +387,17 @@ func (e toolExecutor) codeSearch(ctx context.Context, searchText string, pattern
 	}
 	if usePerlRegexp {
 		args = append(args, "-P")
+		args = append(args, "-e", searchText)
 	} else {
 		args = append(args, "-F")
+		alternatives := fixedSearchAlternatives(searchText)
+		if len(alternatives) == 0 {
+			return "error: search_text has no non-empty alternatives"
+		}
+		for _, alternative := range alternatives {
+			args = append(args, "-e", alternative)
+		}
 	}
-	args = append(args, "-e", searchText)
 	if e.ref != "" {
 		args = append(args, e.ref)
 	}
@@ -258,6 +412,53 @@ func (e toolExecutor) codeSearch(ctx context.Context, searchText string, pattern
 		return "error: " + err.Error()
 	}
 	return formatSearchMatches(string(data), e.ref)
+}
+
+// fixedSearchAlternatives makes the model's common "Foo|Bar" spelling useful
+// without silently upgrading fixed-string searches to regular expressions.
+// An escaped pipe remains literal, so callers can search source expressions
+// such as "left \| right" deterministically.
+func fixedSearchAlternatives(searchText string) []string {
+	var alternatives []string
+	var current strings.Builder
+	appendCurrent := func() {
+		alternative := strings.TrimSpace(current.String())
+		current.Reset()
+		if alternative == "" {
+			return
+		}
+		for _, existing := range alternatives {
+			if existing == alternative {
+				return
+			}
+		}
+		alternatives = append(alternatives, alternative)
+	}
+	for index := 0; index < len(searchText); index++ {
+		if searchText[index] == '\\' && index+1 < len(searchText) {
+			next := searchText[index+1]
+			if next == '\\' {
+				current.WriteByte('\\')
+				index++
+				continue
+			}
+			if strings.ContainsRune(`|.^$*+?()[]{}-`, rune(next)) {
+				// Models commonly escape regex metacharacters even though the
+				// default search mode is fixed-string. The escape is redundant
+				// here; stripping it produces the literal text they intended.
+				current.WriteByte(next)
+				index++
+				continue
+			}
+		}
+		if searchText[index] == '|' {
+			appendCurrent()
+			continue
+		}
+		current.WriteByte(searchText[index])
+	}
+	appendCurrent()
+	return alternatives
 }
 
 func formatSearchMatches(output, ref string) string {

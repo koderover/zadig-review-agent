@@ -18,13 +18,15 @@ type Config struct {
 }
 
 type ReviewConfig struct {
-	Concurrency         int
-	ContextLines        int
-	MaxToolRounds       int
-	MaxContextToolCalls int
-	MaxChunkTokens      int
-	ConfidenceThreshold float64
-	FailOn              []string
+	Concurrency             int
+	ContextLines            int
+	MaxToolRounds           int
+	MaxContextToolCalls     int
+	ContextConvergenceRatio float64
+	MaxChunkTokens          int
+	MaxTokensBudget         int64
+	ConfidenceThreshold     float64
+	FailOn                  []string
 }
 
 type ModelConfig struct {
@@ -55,7 +57,9 @@ func Keys() []KeyInfo {
 		{"review.context_lines", "3", "Context lines around changed lines."},
 		{"review.max_tool_rounds", "30", "Maximum main tool-loop request rounds."},
 		{"review.max_context_tool_calls", "10", "Maximum read/search context tool calls per file review."},
+		{"review.context_convergence_ratio", "0.5", "Fraction of the effective context-tool limit that triggers convergence, >0..1."},
 		{"review.max_chunk_tokens", "12000", "Maximum approximate tokens per review chunk."},
+		{"review.max_tokens_budget", "0", "Maximum total review tokens before new chunks stop dispatching; 0 is unlimited."},
 		{"review.confidence_threshold", "0.75", "Minimum accepted finding confidence, 0..1."},
 		{"review.fail_on", "critical,high", "Comma-separated severities that fail the run."},
 		{"model.protocol", "openai", "Model protocol: openai, gemini, anthropic."},
@@ -74,13 +78,15 @@ func Keys() []KeyInfo {
 func Default() Config {
 	return Config{
 		Review: ReviewConfig{
-			Concurrency:         4,
-			ContextLines:        3,
-			MaxToolRounds:       30,
-			MaxContextToolCalls: 10,
-			MaxChunkTokens:      12000,
-			ConfidenceThreshold: 0.75,
-			FailOn:              []string{"critical", "high"},
+			Concurrency:             4,
+			ContextLines:            3,
+			MaxToolRounds:           30,
+			MaxContextToolCalls:     10,
+			ContextConvergenceRatio: 0.5,
+			MaxChunkTokens:          12000,
+			MaxTokensBudget:         0,
+			ConfidenceThreshold:     0.75,
+			FailOn:                  []string{"critical", "high"},
 		},
 		Model: ModelConfig{
 			Protocol: "openai",
@@ -162,7 +168,9 @@ func render(cfg Config, redact bool) string {
 	fmt.Fprintf(&b, "  context_lines: %d\n", cfg.Review.ContextLines)
 	fmt.Fprintf(&b, "  max_tool_rounds: %d\n", cfg.Review.MaxToolRounds)
 	fmt.Fprintf(&b, "  max_context_tool_calls: %d\n", cfg.Review.MaxContextToolCalls)
+	fmt.Fprintf(&b, "  context_convergence_ratio: %s\n", strconv.FormatFloat(cfg.Review.ContextConvergenceRatio, 'f', -1, 64))
 	fmt.Fprintf(&b, "  max_chunk_tokens: %d\n", cfg.Review.MaxChunkTokens)
+	fmt.Fprintf(&b, "  max_tokens_budget: %d\n", cfg.Review.MaxTokensBudget)
 	fmt.Fprintf(&b, "  confidence_threshold: %s\n", strconv.FormatFloat(cfg.Review.ConfidenceThreshold, 'f', -1, 64))
 	fmt.Fprintf(&b, "  fail_on:\n")
 	for _, severity := range cfg.Review.FailOn {
@@ -215,12 +223,24 @@ func Set(cfg *Config, key, value string) error {
 			return fmt.Errorf("review.max_context_tool_calls must be a positive integer")
 		}
 		cfg.Review.MaxContextToolCalls = v
+	case "review.context_convergence_ratio":
+		v, err := strconv.ParseFloat(value, 64)
+		if err != nil || v <= 0 || v > 1 {
+			return fmt.Errorf("review.context_convergence_ratio must be greater than 0 and at most 1")
+		}
+		cfg.Review.ContextConvergenceRatio = v
 	case "review.max_chunk_tokens":
 		v, err := strconv.Atoi(value)
 		if err != nil || v < 1000 {
 			return fmt.Errorf("review.max_chunk_tokens must be at least 1000")
 		}
 		cfg.Review.MaxChunkTokens = v
+	case "review.max_tokens_budget":
+		v, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || v < 0 {
+			return fmt.Errorf("review.max_tokens_budget must be a non-negative integer")
+		}
+		cfg.Review.MaxTokensBudget = v
 	case "review.confidence_threshold":
 		v, err := strconv.ParseFloat(value, 64)
 		if err != nil || v < 0 || v > 1 {
@@ -299,8 +319,12 @@ func Get(cfg Config, key string) (string, error) {
 		return strconv.Itoa(cfg.Review.MaxToolRounds), nil
 	case "review.max_context_tool_calls":
 		return strconv.Itoa(cfg.Review.MaxContextToolCalls), nil
+	case "review.context_convergence_ratio":
+		return strconv.FormatFloat(cfg.Review.ContextConvergenceRatio, 'f', -1, 64), nil
 	case "review.max_chunk_tokens":
 		return strconv.Itoa(cfg.Review.MaxChunkTokens), nil
+	case "review.max_tokens_budget":
+		return strconv.FormatInt(cfg.Review.MaxTokensBudget, 10), nil
 	case "review.confidence_threshold":
 		return strconv.FormatFloat(cfg.Review.ConfidenceThreshold, 'f', -1, 64), nil
 	case "review.fail_on":
@@ -483,12 +507,24 @@ func (p *yamlParser) assign(section, key, value string) error {
 				return fmt.Errorf("review.max_context_tool_calls must be a positive integer")
 			}
 			p.cfg.Review.MaxContextToolCalls = v
+		case "context_convergence_ratio":
+			v, err := strconv.ParseFloat(value, 64)
+			if err != nil || v <= 0 || v > 1 {
+				return fmt.Errorf("review.context_convergence_ratio must be greater than 0 and at most 1")
+			}
+			p.cfg.Review.ContextConvergenceRatio = v
 		case "max_chunk_tokens":
 			v, err := strconv.Atoi(value)
 			if err != nil || v < 1000 {
 				return fmt.Errorf("review.max_chunk_tokens must be at least 1000")
 			}
 			p.cfg.Review.MaxChunkTokens = v
+		case "max_tokens_budget":
+			v, err := strconv.ParseInt(value, 10, 64)
+			if err != nil || v < 0 {
+				return fmt.Errorf("review.max_tokens_budget must be a non-negative integer")
+			}
+			p.cfg.Review.MaxTokensBudget = v
 		case "confidence_threshold":
 			v, err := strconv.ParseFloat(value, 64)
 			if err != nil || v < 0 || v > 1 {

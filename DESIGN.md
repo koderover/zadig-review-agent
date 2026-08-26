@@ -85,7 +85,9 @@ review:
   context_lines: 3
   max_tool_rounds: 30
   max_context_tool_calls: 10
+  context_convergence_ratio: 0.5
   max_chunk_tokens: 12000
+  max_tokens_budget: 0
   confidence_threshold: 0.75
   fail_on: [critical, high]
 
@@ -169,7 +171,9 @@ Include is a bypass, not an allowlist: it bypasses the extension allowlist and d
 
 The common request supports normalized system, user, assistant, and tool messages; tool definitions; assistant tool calls and matching results; and a `RequireTool` marker. The main loop accepts only native function/tool calls returned by official SDKs. It does not parse textual action JSON or repair legacy response formats.
 
-The first request allows autonomous tool choice. A text-only response adds a reminder and forces tools on later requests (`required`, `ANY`, or `any`, depending on provider). Three consecutive no-tool responses before any valid tool activity produce `tool_loop_empty_limit_reached` and an incomplete review. After valid activity, one forced retry is allowed; a second empty or natural-language response ends the model turn. Reaching `max_tool_rounds` records `tool_loop_limit_reached`.
+The first request allows autonomous tool choice. Runtime tool definitions put `task_done` and `code_comment` before context tools, matching the completion-first decision in the system prompt. Once no concrete hypothesis remains, the model should batch all confirmed findings into one `code_comment` call and call `task_done` in the same response, or call `task_done` alone for a clean review. Outside finalization, `code_comment` does not implicitly complete the review; its result explicitly directs the next turn to `task_done` when nothing remains. During finalization, a successful batched comment is accepted as terminal for providers that cannot emit both calls together.
+
+A text-only response adds a reminder and forces tools on later requests (`required`, `ANY`, or `any`, depending on provider). Three consecutive no-tool responses before any valid tool activity produce `tool_loop_empty_limit_reached` and an incomplete review. After valid activity, a no-tool response on an autonomous round gets one forced retry, and any no-tool response on that retry ends the model turn. Finalization is already a forced-tool round, so an empty or natural-language response there ends immediately without another full request. If a finalization tool call is present but rejected because its arguments or payload are invalid, the model gets exactly one terminal-only repair request; this repair may extend the configured round limit by one. `finalization_failed` is emitted only if that repair also fails. The last configured tool round is reserved for finalization instead of allowing a context call that cannot be followed by a result-submission round.
 
 SDK retries are disabled. The reviewer performs one consistent retry for timeouts, HTTP 408, 429, and 5xx; authentication and parameter errors are not retried. Every actual request contributes to `LLM Requests`.
 
@@ -179,21 +183,24 @@ Plan, Main, Relocation, Review Filter, Memory Compression, and Localization use 
 
 A file with at least 50 changed lines receives a tool-free plan phase. Large hunks are chunked using `max_chunk_tokens`. A local approximate token guard stops requests near 80% of the configured chunk capacity; provider usage remains authoritative.
 
-Each file has at most `review.max_context_tool_calls` context calls, default 10. Changes of at most 10 lines are capped at 6, changes of 11–50 lines at 8, and larger changes at the configured maximum. Once exhausted, only `code_comment` and `task_done` remain available.
+Each file has at most `review.max_context_tool_calls` context calls, default 10. Changes of at most 10 lines are capped at 6, changes of 11–50 lines at 8, and larger changes at the configured maximum. Convergence begins at `ceil(effective_limit × review.context_convergence_ratio)`; the ratio defaults to `0.5` and can also be set with `--context-convergence-ratio`. The model may then use at most one final batched context round and must submit findings or finish. This soft limit starts convergence halfway through the effective budget, reducing low-value exploratory calls while preserving one final evidence-gathering round. `changed_diff_read` counts as one context call even when it batches several paths. During finalization, only `task_done` and `code_comment` remain available.
+
+`review.max_tokens_budget` (or `--max-tokens-budget`) provides an aggregate input-plus-output token budget; `0` is unlimited. Before dispatching each file/chunk, the scheduler reserves an OCR-style estimate for it and stops when committed usage plus the next estimate would exceed the budget. Already dispatched work is allowed to finish. The resulting partial review is marked incomplete and identifies the first skipped chunk with `token_budget_reached`.
 
 Native tools in `internal/reviewer/tools.json` are:
 
 - `file_read`: read at most 500 lines from the post-change snapshot.
-- `code_search`: search tracked files through `git grep`, with pathspec, case, and PCRE options.
+- `code_search`: search tracked files through `git grep`, with pathspec, case, and PCRE options. In the default fixed-string mode, an unescaped `|` separates OR alternatives, `\|` searches for a literal pipe, and redundant regex escapes such as `\(` or `\.` are normalized to their literal characters.
+- `changed_diff_read`: batch-read up to 10 other diffs from the reviewed change set. Valid paths are returned even when the same batch contains the current file, malformed paths, or paths outside the reviewed change; rejected paths are reported alongside the valid output. Each valid path is injected at most once per file/chunk session, with a cumulative 32 KiB changed-diff limit.
 - `file_find`: find files by basename keyword, not glob.
-- `code_comment`: submit one candidate finding for the current file.
+- `code_comment`: submit up to 10 candidate findings for the current file in one batched call; the legacy single `finding` argument remains accepted. An omitted `file` is scoped to the current file; a non-empty path naming another file is rejected. Mixed batches retain valid current-file findings.
 - `task_done`: explicitly finish the current file review.
 
-Assistant tool calls and all matching results are retained. Output is capped at 32 KiB and remains valid UTF-8. Identical context calls are cached within one file/chunk session; fully covered `file_read` ranges also hit the cache. Cache hits neither re-execute nor consume tool budget and re-inject the real cached content. Subtasks do not share caches.
+Assistant tool calls and all matching results are retained. Output is capped at 32 KiB and remains valid UTF-8. Identical context calls are cached within one file/chunk session; fully covered `file_read` ranges also hit the cache. Cache hits neither re-execute nor consume tool budget and re-inject the real cached content. `changed_diff_read` uses stricter path-level deduplication: overlapping calls return only previously unseen paths, and a fully repeated request returns a short cached notice without injecting the diff again. Once all paths have been read or its cumulative limit is reached, the tool is removed from later requests. Subtasks do not share caches.
 
 ### Context compression
 
-Before each main request, the reviewer estimates message and tool-definition tokens. At 60% of `max_chunk_tokens`, completed older rounds may be synchronously summarized:
+Before each autonomous main request, the reviewer estimates message and tool-definition tokens. At 60% of `max_chunk_tokens`, completed older rounds may be synchronously summarized. Convergence and Finalization requests skip this opportunistic compression because they are terminal or permit at most one final evidence round:
 
 - system and initial user messages remain fixed;
 - older complete assistant/tool rounds are summarized;
@@ -207,20 +214,21 @@ Commit/range `file_read` uses the reviewed ref; workspace mode uses the working 
 
 ## 9. Finding validation
 
-`code_comment` submits severity, category, optional rule ID, path, line range, existing code, human-readable explanation, suggestion, and confidence. Severity and category are normalized to lowercase. Categories are restricted to correctness, security, concurrency, performance, compatibility, and tests, with deterministic aliases for a few common model values. Unknown categories are rejected.
+`code_comment` submits one `finding` or a `findings` batch of up to 10 entries. Each entry contains severity, category, optional rule ID, path, line range, existing code, human-readable explanation, suggestion, and confidence. Severity and category are normalized to lowercase. Categories are restricted to correctness, security, concurrency, performance, compatibility, and tests, with deterministic aliases for a few common model values. Unknown categories are rejected.
 
 After Review Filter, non-English output is localized in one tool-free batch unless every human-readable field already uses the requested Chinese script. Localization can only rewrite title, problem, evidence, and suggestion by candidate ID. It cannot change paths, lines, severity, category, confidence, or finding count. Review Filter and Localization accept bare arrays and a small set of common wrappers, retry malformed responses once with strict formatting, and retain original findings while marking the review incomplete if retries fail. A response ending with `finish_reason=length` is reported explicitly as truncated and is not replayed into the retry context.
 
 Validation order is:
 
 1. locate exact contiguous `existing_code` in a new-side hunk;
-2. otherwise accept a supplied line range overlapping a changed line;
-3. otherwise ask Relocation for exact existing code and drop only that candidate if it cannot be located;
-4. assign stable temporary IDs such as `c-0`;
-5. let Review Filter return IDs to delete only;
-6. allow deletion only when the diff directly disproves a candidate;
-7. retain candidates and mark incomplete if filtering fails;
-8. revalidate lines, severity, confidence, and path, then fingerprint, deduplicate, and aggregate.
+2. if non-empty `existing_code` does not match the current diff, never trust a coincidentally overlapping supplied line range; when the snippet appears in another changed file, drop the candidate without Relocation;
+3. only when `existing_code` is empty, accept a supplied line range overlapping a changed line;
+4. otherwise ask Relocation for exact existing code; malformed JSON receives one strict repair request, while a valid but unresolvable snippet drops only that candidate;
+5. assign stable temporary IDs such as `c-0`;
+6. let Review Filter return IDs to delete only;
+7. allow deletion only when the diff directly disproves a candidate;
+8. retain candidates and mark incomplete if filtering fails;
+9. revalidate lines, severity, confidence, and path, then fingerprint, deduplicate, and aggregate.
 
 Allowed severities are critical, high, medium, and low. Findings below `confidence_threshold` are removed. Only local `fail_on` policy determines the quality gate.
 

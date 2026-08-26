@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -39,6 +40,9 @@ func toolProgressLabel(call agent.ToolCall) string {
 	switch call.Tool {
 	case "file_read":
 		return fmt.Sprintf("file_read %q", truncateProgressValue(call.Arguments.FilePath))
+	case "changed_diff_read":
+		data, _ := json.Marshal(call.Arguments.FilePaths)
+		return fmt.Sprintf("changed_diff_read %s", truncateProgressValue(string(data)))
 	case "code_search":
 		scope := "repository"
 		if len(call.Arguments.FilePatterns) > 0 {
@@ -97,7 +101,7 @@ func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rule
 		r.trace("%splan skipped (%d lines < %d)", r.progressFilePrefix(file.Path), changedLines, planLineThreshold)
 	}
 
-	candidates, loopWarnings, err := r.runMainLoop(ctx, file, values, changedLines, &usage)
+	candidates, loopWarnings, err := r.runMainLoop(ctx, file, allFiles, values, changedLines, &usage)
 	warnings = append(warnings, loopWarnings...)
 	if err != nil {
 		return nil, usage, warnings, err
@@ -108,7 +112,7 @@ func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rule
 
 	positioned := make([]agent.Finding, 0, len(candidates))
 	for _, candidate := range candidates {
-		finding, ok, relocationWarning := r.positionFinding(ctx, candidate, file, values, &usage, true)
+		finding, ok, relocationWarning := r.positionFinding(ctx, candidate, file, allFiles, values, &usage, true)
 		if relocationWarning != "" {
 			warnings = append(warnings, relocationWarning)
 		}
@@ -141,7 +145,7 @@ func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rule
 	}
 	final := make([]agent.Finding, 0, len(filtered))
 	for _, candidate := range filtered {
-		finding, ok, _ := r.positionFinding(ctx, candidate, file, values, &usage, false)
+		finding, ok, _ := r.positionFinding(ctx, candidate, file, allFiles, values, &usage, false)
 		if ok {
 			final = append(final, finding)
 		}
@@ -150,8 +154,8 @@ func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rule
 	return findings, usage, warnings, err
 }
 
-func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values map[string]string, changedLines int, usage *agent.TokenUsage) ([]agent.Finding, []string, error) {
-	executor := newToolExecutor(r.Root, r.DiffRequest)
+func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles []gitdiff.FileDiff, values map[string]string, changedLines int, usage *agent.TokenUsage) ([]agent.Finding, []string, error) {
+	executor := newToolExecutor(r.Root, r.DiffRequest).withChangedDiffs(file.Path, allFiles)
 	definitions, err := loadToolDefinitions()
 	if err != nil {
 		return nil, nil, err
@@ -178,20 +182,41 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values m
 	contextToolCalls := 0
 	contextToolCache := make(map[string]cachedContextTool)
 	finalizing := false
+	converging := false
+	finalizationRepairPending := false
+	finalizationRepairUsed := false
+	contextSoftLimit := contextConvergenceThreshold(maxContextToolCalls, r.Config.Review.ContextConvergenceRatio)
 	compressionEnabled := true
-	for round := 0; round < maxToolRounds; round++ {
+	roundLimit := maxToolRounds
+	for round := 0; round < roundLimit; round++ {
 		if contextToolCalls >= maxContextToolCalls && !finalizing {
 			finalizing = true
+			converging = false
 			requireTool = true
-			messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "The context tool budget is exhausted. Finalize now using code_comment for each concrete finding, then task_done. Do not request more repository context."})
+			messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "The context tool budget is exhausted. Finalize now with one code_comment call containing all confirmed findings, or task_done. Do not request more repository context."})
 			r.trace("%scontext tool budget reached (%d); finalizing review", r.progressFilePrefix(file.Path), maxContextToolCalls)
+		} else if round == maxToolRounds-1 && !finalizing {
+			finalizing = true
+			converging = false
+			requireTool = true
+			messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "This is the final review round. Finish now with one code_comment call containing all confirmed findings, or task_done."})
+			r.trace("%sfinal tool round reached; finalizing review", r.progressFilePrefix(file.Path))
+		} else if contextToolCalls >= contextSoftLimit && !finalizing && !converging {
+			converging = true
+			requireTool = true
+			messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: fmt.Sprintf("You have used %d of %d context calls. Converge now: if one specific unresolved hypothesis still needs evidence, use at most one final batched context-tool round with no more than %d total context calls; otherwise finish immediately with one code_comment call containing all confirmed findings, or task_done.", contextToolCalls, maxContextToolCalls, maxContextToolCalls-contextToolCalls)})
+			r.trace("%scontext soft limit reached (%d/%d); requesting convergence", r.progressFilePrefix(file.Path), contextToolCalls, maxContextToolCalls)
 		}
 		requestTools := definitions
+		if executor.changedDiffWasUsed() && !executor.hasUnreadChangedDiffs() {
+			requestTools = toolsWithout(requestTools, "changed_diff_read")
+		}
 		if finalizing {
 			requestTools = finalizationDefinitions
 		}
+		requestWasConverging := converging && !finalizing
 		requestRequiredTool := requireTool
-		if compressionEnabled {
+		if compressionEnabled && !finalizing && !requestWasConverging {
 			var compressionWarning string
 			messages, compressionWarning = r.maybeCompressMessages(ctx, file.Path, round+1, messages, requestTools, requestRequiredTool, usage)
 			if compressionWarning != "" {
@@ -214,9 +239,14 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values m
 			return nil, warnings, err
 		}
 		if len(response.ToolCalls) == 0 {
-			if hadToolActivity && requestRequiredTool && (strings.TrimSpace(response.Text) != "" || consecutiveEmptyRounds > 0) {
+			if finalizationRepairPending {
+				warnings = append(warnings, "finalization_failed: "+file.Path)
+				r.trace("%sfinalization repair returned no tool call", r.progressFilePrefix(file.Path))
+				return comments, warnings, nil
+			}
+			if hadToolActivity && requestRequiredTool {
 				if strings.TrimSpace(response.Text) == "" {
-					r.trace("%sreview completed after empty required-tool retry", r.progressFilePrefix(file.Path))
+					r.trace("%sreview completed after empty finalization response", r.progressFilePrefix(file.Path))
 				} else {
 					r.trace("%sreview completed by model end turn", r.progressFilePrefix(file.Path))
 				}
@@ -255,6 +285,8 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values m
 		}
 		messages = append(messages, protocol.Message{Role: protocol.RoleAssistant, Content: response.Text, ToolCalls: toolCalls})
 		done := false
+		commented := false
+		usedContextTool := false
 		for callIndex, toolCall := range toolCalls {
 			action := actions[callIndex]
 			action.Tool = toolCall.Name
@@ -269,20 +301,43 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values m
 			var result toolExecution
 			switch action.Tool {
 			case "code_comment":
-				if action.Finding.File == "" {
-					action.Finding.File = file.Path
+				findings := actionFindings(action)
+				if len(findings) == 0 {
+					result = toolExecution{Output: "error: code_comment requires finding or findings", OutputBytes: len("error: code_comment requires finding or findings"), Status: "error", Summary: "missing finding"}
+				} else {
+					findings, accepted, rejected := findingsForCurrentFile(findings, file.Path)
+					if len(action.Findings) > 0 {
+						action.Findings = append([]agent.Finding(nil), findings...)
+					} else {
+						action.Finding = findings[0]
+					}
+					if len(accepted) == 0 {
+						output := fmt.Sprintf("error: rejected %d finding(s) targeting files other than the current file %q; context files are not comment targets", len(rejected), file.Path)
+						result = toolExecution{Output: output, OutputBytes: len(output), Status: "error", Summary: "foreign-file findings rejected"}
+					} else {
+						comments = append(comments, accepted...)
+						commented = true
+						output := fmt.Sprintf("%d comment(s) collected.", len(accepted))
+						if len(rejected) > 0 {
+							output += fmt.Sprintf(" Rejected %d finding(s) targeting other files.", len(rejected))
+						}
+						output += " If no specific unresolved hypothesis remains, call task_done now."
+						result = toolExecution{Output: output, OutputBytes: len(output), Status: "success", Summary: output}
+					}
 				}
-				comments = append(comments, action.Finding)
-				result = toolExecution{Output: "comment collected", OutputBytes: len("comment collected"), Status: "success", Summary: "comment collected"}
 				call := r.process.begin(file.Path, round+1, action)
 				record := r.process.finish(call, result)
 				r.traceToolCall(file.Path, record)
 			case "task_done":
 				done = true
 				result = toolExecution{Output: "review completed", OutputBytes: len("review completed"), Status: "success", Summary: "review completed"}
-			case "file_read", "code_search", "file_find":
+			case "file_read", "changed_diff_read", "code_search", "file_find":
+				usedContextTool = true
 				call := r.process.begin(file.Path, round+1, action)
-				if cached, ok := findCachedContextTool(action, contextToolCache); ok {
+				if action.Tool == "changed_diff_read" && !executor.changedDiffRequestHasUnread(action.FilePaths) {
+					output := "all requested changed diffs were already provided; no new diff content"
+					result = toolExecution{Output: output, OutputBytes: len(output), Status: "success", Summary: "cached: no new changed diffs", Cached: true}
+				} else if cached, ok := findCachedContextTool(action, contextToolCache); ok {
 					result = cached.result
 					result.Cached = true
 					result.Summary = "cached: " + result.Summary
@@ -302,12 +357,107 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, values m
 			}
 			messages = append(messages, protocol.Message{Role: protocol.RoleTool, ToolCallID: toolCall.ID, ToolName: toolCall.Name, Content: result.Output})
 		}
-		if done {
+		if finalizing && !done && !commented {
+			if !finalizationRepairUsed {
+				finalizationRepairUsed = true
+				finalizationRepairPending = true
+				requireTool = true
+				if round+1 >= roundLimit {
+					roundLimit++
+				}
+				messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "Your previous final tool call was rejected. This is the only repair attempt. Resubmit code_comment with complete valid JSON containing exactly one of finding or findings, or call task_done if there is no finding to submit. Do not return text only and do not request more context."})
+				r.trace("%sfinalization tool call invalid; allowing one terminal-only repair", r.progressFilePrefix(file.Path))
+				continue
+			}
+			warnings = append(warnings, "finalization_failed: "+file.Path)
+			r.trace("%sfinalization repair failed", r.progressFilePrefix(file.Path))
+		}
+		if done || finalizing {
 			return comments, warnings, nil
+		}
+		if commented && !requestWasConverging {
+			converging = true
+			requireTool = true
+			messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "The confirmed findings were recorded. If one specific unresolved hypothesis remains, use one final batched context-tool round; otherwise call task_done now. Do not begin a new investigation."})
+			r.trace("%scomments recorded; requesting explicit task completion", r.progressFilePrefix(file.Path))
+			continue
+		}
+		if requestWasConverging {
+			converging = false
+			finalizing = true
+			requireTool = true
+			if usedContextTool {
+				messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "The final context round is complete. Finish now with one code_comment call containing all confirmed findings, or task_done."})
+				r.trace("%sfinal context round used; finalizing review", r.progressFilePrefix(file.Path))
+			} else {
+				messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "Finish now with one code_comment call containing all confirmed findings, or task_done."})
+			}
 		}
 	}
 	warnings = append(warnings, "tool_loop_limit_reached: "+file.Path)
 	return comments, warnings, nil
+}
+
+func contextConvergenceThreshold(hardLimit int, ratio float64) int {
+	if hardLimit <= 1 {
+		return hardLimit
+	}
+	if ratio <= 0 || ratio > 1 {
+		ratio = 0.5
+	}
+	threshold := int(math.Ceil(float64(hardLimit) * ratio))
+	if threshold < 1 {
+		return 1
+	}
+	if threshold > hardLimit {
+		return hardLimit
+	}
+	return threshold
+}
+
+func actionFindings(action toolAction) []agent.Finding {
+	hasSingle := hasFinding(action.Finding)
+	hasBatch := len(action.Findings) > 0
+	if hasSingle == hasBatch || len(action.Findings) > 10 {
+		return nil
+	}
+	findings := append([]agent.Finding(nil), action.Findings...)
+	if hasSingle {
+		findings = append(findings, action.Finding)
+	}
+	return findings
+}
+
+func findingsForCurrentFile(findings []agent.Finding, currentFile string) ([]agent.Finding, []agent.Finding, []agent.Finding) {
+	normalized := make([]agent.Finding, 0, len(findings))
+	accepted := make([]agent.Finding, 0, len(findings))
+	rejected := make([]agent.Finding, 0)
+	for _, finding := range findings {
+		finding.File = strings.TrimSpace(finding.File)
+		if finding.File == "" || sameReviewPath(finding.File, currentFile) {
+			finding.File = currentFile
+			accepted = append(accepted, finding)
+		} else {
+			rejected = append(rejected, finding)
+		}
+		normalized = append(normalized, finding)
+	}
+	return normalized, accepted, rejected
+}
+
+func sameReviewPath(left, right string) bool {
+	normalize := func(value string) string {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return ""
+		}
+		return filepath.ToSlash(filepath.Clean(value))
+	}
+	return normalize(left) == normalize(right)
+}
+
+func hasFinding(finding agent.Finding) bool {
+	return finding.Severity != "" || finding.Category != "" || finding.RuleID != "" || finding.File != "" || finding.StartLine != 0 || finding.EndLine != 0 || finding.ExistingCode != "" || finding.Title != "" || finding.Problem != "" || finding.Evidence != "" || finding.Suggestion != "" || finding.Confidence != 0
 }
 
 func contextToolBudget(configured, changedLines int) int {
@@ -384,6 +534,20 @@ func finalizationTools(definitions []protocol.ToolDefinition) []protocol.ToolDef
 	tools := make([]protocol.ToolDefinition, 0, 2)
 	for _, definition := range definitions {
 		if definition.Name == "code_comment" || definition.Name == "task_done" {
+			tools = append(tools, definition)
+		}
+	}
+	return tools
+}
+
+func toolsWithout(definitions []protocol.ToolDefinition, names ...string) []protocol.ToolDefinition {
+	excluded := make(map[string]bool, len(names))
+	for _, name := range names {
+		excluded[name] = true
+	}
+	tools := make([]protocol.ToolDefinition, 0, len(definitions))
+	for _, definition := range definitions {
+		if !excluded[definition.Name] {
 			tools = append(tools, definition)
 		}
 	}
@@ -549,12 +713,22 @@ func agentSourceLocation(skip int) string {
 	return fmt.Sprintf("%s:%d", file, line)
 }
 
-func (r Runner) positionFinding(ctx context.Context, finding agent.Finding, file gitdiff.FileDiff, values map[string]string, usage *agent.TokenUsage, allowRelocation bool) (agent.Finding, bool, string) {
+func (r Runner) positionFinding(ctx context.Context, finding agent.Finding, file gitdiff.FileDiff, allFiles []gitdiff.FileDiff, values map[string]string, usage *agent.TokenUsage, allowRelocation bool) (agent.Finding, bool, string) {
+	if strings.TrimSpace(finding.File) != "" && !sameReviewPath(finding.File, file.Path) {
+		r.trace("%sdropped comment targeting other file %q", r.progressFilePrefix(file.Path), finding.File)
+		return finding, false, ""
+	}
+	finding.File = file.Path
 	if start, end, ok := resolveExistingCode(file, finding.ExistingCode); ok {
 		finding.StartLine, finding.EndLine = start, end
 		return finding, true, ""
 	}
-	if overlapsChangedLine(file, finding.StartLine, finding.EndLine) {
+	if strings.TrimSpace(finding.ExistingCode) != "" {
+		if otherFile, ok := existingCodeOwner(finding.ExistingCode, file.Path, allFiles); ok {
+			r.trace("%sdropped comment whose existing_code belongs to %q", r.progressFilePrefix(file.Path), otherFile)
+			return finding, false, ""
+		}
+	} else if overlapsChangedLine(file, finding.StartLine, finding.EndLine) {
 		return finding, true, ""
 	}
 	if !allowRelocation {
@@ -568,14 +742,32 @@ func (r Runner) positionFinding(ctx context.Context, finding agent.Finding, file
 	if err != nil {
 		return finding, false, "relocation_failed: " + file.Path + ": " + err.Error()
 	}
-	response, err := r.completeAudited(ctx, "relocation", file.Path, 1, protocol.Request{Messages: messages}, usage)
-	if err != nil {
-		return finding, false, "relocation_failed: " + file.Path + ": " + err.Error()
-	}
 	var relocated struct {
 		ExistingCode string `json:"existing_code"`
 	}
-	if err := json.Unmarshal(extractJSONValue(response.Text), &relocated); err != nil {
+	var parseErr error
+	request := protocol.Request{Messages: messages}
+	for attempt := 1; attempt <= 2; attempt++ {
+		response, err := r.completeAudited(ctx, "relocation", file.Path, attempt, request, usage)
+		if err != nil {
+			return finding, false, "relocation_failed: " + file.Path + ": " + err.Error()
+		}
+		relocated = struct {
+			ExistingCode string `json:"existing_code"`
+		}{}
+		parseErr = json.Unmarshal(extractJSONValue(response.Text), &relocated)
+		if parseErr == nil {
+			break
+		}
+		if attempt == 1 {
+			if !modelOutputTruncated(response) {
+				request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleAssistant, Content: response.Text})
+			}
+			request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleUser, Content: `Your response was not valid. Return only one complete JSON object in the form {"existing_code":"exact contiguous snippet from added or context lines"}, with no wrapper or explanation.`})
+			r.trace("%srelocation response invalid; retrying", r.progressFilePrefix(file.Path))
+		}
+	}
+	if parseErr != nil {
 		return finding, false, "relocation_invalid_response: " + file.Path
 	}
 	if start, end, ok := resolveExistingCode(file, relocated.ExistingCode); ok {
@@ -586,6 +778,18 @@ func (r Runner) positionFinding(ctx context.Context, finding agent.Finding, file
 	}
 	r.trace("%srelocation unresolved", r.progressFilePrefix(file.Path))
 	return finding, false, ""
+}
+
+func existingCodeOwner(existingCode, currentFile string, allFiles []gitdiff.FileDiff) (string, bool) {
+	for _, candidate := range allFiles {
+		if sameReviewPath(candidate.Path, currentFile) {
+			continue
+		}
+		if _, _, ok := locateExistingCode(candidate, existingCode, false); ok {
+			return candidate.Path, true
+		}
+	}
+	return "", false
 }
 
 func (r Runner) completeTracked(ctx context.Context, request protocol.Request, usage *agent.TokenUsage) (protocol.Response, error) {
@@ -636,6 +840,10 @@ func estimateRequestTokens(request protocol.Request) int {
 }
 
 func resolveExistingCode(file gitdiff.FileDiff, existingCode string) (int, int, bool) {
+	return locateExistingCode(file, existingCode, true)
+}
+
+func locateExistingCode(file gitdiff.FileDiff, existingCode string, requireChangedLine bool) (int, int, bool) {
 	snippet := normalizedSnippet(existingCode)
 	if len(snippet) == 0 {
 		return 0, 0, false
@@ -657,7 +865,7 @@ func resolveExistingCode(file gitdiff.FileDiff, existingCode string) (int, int, 
 			}
 			if matched {
 				start, end := lines[i].NewLine, lines[i+len(snippet)-1].NewLine
-				if overlapsChangedLine(file, start, end) {
+				if !requireChangedLine || overlapsChangedLine(file, start, end) {
 					return start, end, true
 				}
 			}

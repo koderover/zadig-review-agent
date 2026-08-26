@@ -63,7 +63,9 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	contextLines := fs.Int("context-lines", 0, "context lines around changes")
 	maxToolRounds := fs.Int("max-tool-rounds", 0, "max main tool-loop request rounds")
 	maxContextToolCalls := fs.Int("max-context-tool-calls", 0, "max read/search context tool calls per file review")
+	contextConvergenceRatio := fs.Float64("context-convergence-ratio", 0, "fraction of the context-tool limit that triggers convergence, >0..1")
 	maxChunkTokens := fs.Int("max-chunk-tokens", 0, "max tokens per review chunk")
+	maxTokensBudget := fs.Int64("max-tokens-budget", 0, "max total review tokens before new chunks stop dispatching (0 = unlimited)")
 	confidenceThreshold := fs.Float64("confidence-threshold", 0, "minimum accepted finding confidence")
 	failOn := fs.String("fail-on", "", "comma-separated severities that fail the run")
 	language := fs.String("language", "", "language for review finding content, e.g. zh-CN or en-US")
@@ -87,22 +89,24 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	}
 	visited := visitedFlags(fs)
 	if err := applyCLIOverrides(&cfg, visited, cliOverrides{
-		concurrency:         *concurrency,
-		contextLines:        *contextLines,
-		maxToolRounds:       *maxToolRounds,
-		maxContextToolCalls: *maxContextToolCalls,
-		maxChunkTokens:      *maxChunkTokens,
-		confidenceThreshold: *confidenceThreshold,
-		failOn:              *failOn,
-		language:            *language,
-		modelProtocol:       *modelProtocol,
-		modelName:           *modelName,
-		modelEndpoint:       *modelEndpoint,
-		modelTimeout:        *modelTimeout,
-		jsonOut:             *jsonOut,
-		mdOut:               *mdOut,
-		console:             *console,
-		progress:            *progress,
+		concurrency:             *concurrency,
+		contextLines:            *contextLines,
+		maxToolRounds:           *maxToolRounds,
+		maxContextToolCalls:     *maxContextToolCalls,
+		contextConvergenceRatio: *contextConvergenceRatio,
+		maxChunkTokens:          *maxChunkTokens,
+		maxTokensBudget:         *maxTokensBudget,
+		confidenceThreshold:     *confidenceThreshold,
+		failOn:                  *failOn,
+		language:                *language,
+		modelProtocol:           *modelProtocol,
+		modelName:               *modelName,
+		modelEndpoint:           *modelEndpoint,
+		modelTimeout:            *modelTimeout,
+		jsonOut:                 *jsonOut,
+		mdOut:                   *mdOut,
+		console:                 *console,
+		progress:                *progress,
 	}); err != nil {
 		return agent.ExitIncomplete, err
 	}
@@ -573,22 +577,24 @@ func usage(w io.Writer) {
 }
 
 type cliOverrides struct {
-	concurrency         int
-	contextLines        int
-	maxToolRounds       int
-	maxContextToolCalls int
-	maxChunkTokens      int
-	confidenceThreshold float64
-	failOn              string
-	language            string
-	modelProtocol       string
-	modelName           string
-	modelEndpoint       string
-	modelTimeout        string
-	jsonOut             string
-	mdOut               string
-	console             string
-	progress            bool
+	concurrency             int
+	contextLines            int
+	maxToolRounds           int
+	maxContextToolCalls     int
+	contextConvergenceRatio float64
+	maxChunkTokens          int
+	maxTokensBudget         int64
+	confidenceThreshold     float64
+	failOn                  string
+	language                string
+	modelProtocol           string
+	modelName               string
+	modelEndpoint           string
+	modelTimeout            string
+	jsonOut                 string
+	mdOut                   string
+	console                 string
+	progress                bool
 }
 
 func visitedFlags(fs *flag.FlagSet) map[string]bool {
@@ -624,11 +630,23 @@ func applyCLIOverrides(cfg *config.Config, visited map[string]bool, o cliOverrid
 		}
 		cfg.Review.MaxContextToolCalls = o.maxContextToolCalls
 	}
+	if visited["context-convergence-ratio"] {
+		if o.contextConvergenceRatio <= 0 || o.contextConvergenceRatio > 1 {
+			return fmt.Errorf("--context-convergence-ratio must be greater than 0 and at most 1")
+		}
+		cfg.Review.ContextConvergenceRatio = o.contextConvergenceRatio
+	}
 	if visited["max-chunk-tokens"] {
 		if o.maxChunkTokens < 1000 {
 			return fmt.Errorf("--max-chunk-tokens must be at least 1000")
 		}
 		cfg.Review.MaxChunkTokens = o.maxChunkTokens
+	}
+	if visited["max-tokens-budget"] {
+		if o.maxTokensBudget < 0 {
+			return fmt.Errorf("--max-tokens-budget must be a non-negative integer")
+		}
+		cfg.Review.MaxTokensBudget = o.maxTokensBudget
 	}
 	if visited["confidence-threshold"] {
 		if o.confidenceThreshold < 0 || o.confidenceThreshold > 1 {

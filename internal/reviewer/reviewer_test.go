@@ -147,7 +147,7 @@ func TestRunnerCountsFailedLLMRequest(t *testing.T) {
 	for _, want := range []string{
 		"llm request failed", "stage=review", `file="main.go"`, `agent_source="internal/reviewer/agent_loop.go:`, "round=1", "request_attempts=1",
 		"duration=", "configured_timeout=2m0s", "review_concurrency=4",
-		"message_count=2", `tools="file_read,code_search,file_find,code_comment,task_done"`,
+		"message_count=2", `tools="task_done,code_comment,file_read,code_search,changed_diff_read,file_find"`,
 		"require_tool=false", "estimated_tokens=", "protocol=openai", `model="configured-model"`, "timeout",
 	} {
 		if !strings.Contains(detail, want) {
@@ -266,6 +266,28 @@ func TestRunnerAcceptsSecondEmptyEndTurnAfterToolActivity(t *testing.T) {
 	}
 }
 
+func TestRunnerAcceptsEmptyFinalizationAsImplicitDone(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "dep.go"), []byte("package dep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := gitdiff.FileDiff{Path: "main.go", Hunks: []gitdiff.Hunk{{ChangedLines: map[int]bool{1: true}}}}
+	cfg := config.Default()
+	cfg.Review.MaxContextToolCalls = 1
+	llm := &recordingLLM{responses: []protocol.Response{
+		toolResponse("read", "file_read", `{"file_path":"dep.go","start_line":1,"end_line":10}`),
+		{},
+	}}
+	r := Runner{Root: root, Config: cfg, Git: fakeGit{files: []gitdiff.FileDiff{file}}, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, RuleResolver: testRuleResolver()}
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Incomplete || report.ExitCode != agent.ExitOK || len(report.Warnings) != 0 || report.Usage.LLMRequests != 2 || len(llm.requests) != 2 || !llm.requests[1].RequireTool {
+		t.Fatalf("empty finalization response must complete without another retry: report=%+v requests=%+v", report, llm.requests)
+	}
+}
+
 func TestValidateFindingsNormalizesModelEnumVariants(t *testing.T) {
 	file := reviewTestFile()
 	findings, err := validateFindings([]agent.Finding{{
@@ -309,6 +331,260 @@ func TestRunnerFinalizesAfterContextToolBudget(t *testing.T) {
 	}
 }
 
+func TestMainLoopRepairsInvalidFinalizationArguments(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "dep.go"), []byte("package dep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := reviewTestFile()
+	cfg := config.Default()
+	cfg.Review.MaxContextToolCalls = 1
+	cfg.Review.MaxToolRounds = 2
+	finding := agent.Finding{Severity: "high", Category: "correctness", Title: "issue", Problem: "problem", Evidence: "evidence", Suggestion: "suggestion", Confidence: 0.9}
+	arguments, _ := json.Marshal(map[string]any{"findings": []agent.Finding{finding}})
+	llm := &recordingLLM{responses: []protocol.Response{
+		toolResponse("read", "file_read", `{"file_path":"dep.go","start_line":1,"end_line":1}`),
+		toolResponse("invalid-comment", "code_comment", `{"findings":`),
+		toolResponse("repaired-comment", "code_comment", string(arguments)),
+	}}
+	r := Runner{Root: root, Config: cfg, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	got, warnings, err := r.runMainLoop(context.Background(), file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), 1, &usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(got) != 1 || len(llm.requests) != 3 {
+		t.Fatalf("valid repair must recover finalization beyond the normal round limit: findings=%+v warnings=%v requests=%d", got, warnings, len(llm.requests))
+	}
+	if !llm.requests[2].RequireTool || len(llm.requests[2].Tools) != 2 || !requestContains(llm.requests[2], "only repair attempt") {
+		t.Fatalf("repair request must expose only terminal tools and require one: %+v", llm.requests[2])
+	}
+	calls := r.process.snapshot().ToolCalls
+	if len(calls) != 3 || calls[1].Status != "error" || calls[1].Summary != "invalid tool arguments" || calls[2].Status != "success" {
+		t.Fatalf("finalization repair was not audited correctly: %+v", calls)
+	}
+}
+
+func TestMainLoopReportsFinalizationFailureAfterRepairFails(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		response protocol.Response
+	}{
+		{name: "invalid arguments", response: toolResponse("invalid-again", "code_comment", `{"findings":`)},
+		{name: "no tool call", response: protocol.Response{Text: "unable to repair"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "dep.go"), []byte("package dep\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			file := reviewTestFile()
+			cfg := config.Default()
+			cfg.Review.MaxContextToolCalls = 1
+			cfg.Review.MaxToolRounds = 2
+			llm := &recordingLLM{responses: []protocol.Response{
+				toolResponse("read", "file_read", `{"file_path":"dep.go","start_line":1,"end_line":1}`),
+				toolResponse("invalid-comment", "code_comment", `{"findings":`),
+				test.response,
+			}}
+			r := Runner{Root: root, Config: cfg, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+			usage := agent.TokenUsage{}
+			got, warnings, err := r.runMainLoop(context.Background(), file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), 1, &usage)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 0 || len(warnings) != 1 || warnings[0] != "finalization_failed: "+file.Path || len(llm.requests) != 3 {
+				t.Fatalf("failed repair must report one finalization warning: findings=%+v warnings=%v requests=%d", got, warnings, len(llm.requests))
+			}
+		})
+	}
+}
+
+func TestMainLoopConvergesBeforeHardContextBudget(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"dep1.go", "dep2.go", "dep3.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("package dep\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := reviewTestFile()
+	cfg := config.Default()
+	cfg.Review.MaxContextToolCalls = 4
+	cfg.Review.ContextConvergenceRatio = 0.5
+	llm := &recordingLLM{responses: []protocol.Response{
+		toolResponse("read-1", "file_read", `{"file_path":"dep1.go","start_line":1,"end_line":1}`),
+		toolResponse("read-2", "file_read", `{"file_path":"dep2.go","start_line":1,"end_line":1}`),
+		toolResponse("read-3", "file_read", `{"file_path":"dep3.go","start_line":1,"end_line":1}`),
+		doneResponse(),
+	}}
+	r := Runner{Root: root, Config: cfg, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	_, warnings, err := r.runMainLoop(context.Background(), file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), 1, &usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(llm.requests) != 4 || len(r.process.snapshot().ToolCalls) != 3 {
+		t.Fatalf("review did not converge before the hard budget: warnings=%v requests=%d calls=%+v", warnings, len(llm.requests), r.process.snapshot().ToolCalls)
+	}
+	if !llm.requests[2].RequireTool || !requestContains(llm.requests[2], "Converge now") || len(llm.requests[2].Tools) != 6 {
+		t.Fatalf("soft limit must allow exactly one final context round: %+v", llm.requests[2])
+	}
+	if !llm.requests[3].RequireTool || len(llm.requests[3].Tools) != 2 || !requestContains(llm.requests[3], "final context round is complete") {
+		t.Fatalf("final context round must transition directly to finalization: %+v", llm.requests[3])
+	}
+}
+
+func TestContextConvergenceThresholdUsesConfiguredRatio(t *testing.T) {
+	for _, test := range []struct {
+		hard  int
+		ratio float64
+		want  int
+	}{
+		{hard: 10, ratio: 0.7, want: 7},
+		{hard: 6, ratio: 0.7, want: 5},
+		{hard: 4, ratio: 0.5, want: 2},
+		{hard: 1, ratio: 0.7, want: 1},
+		{hard: 10, ratio: 0, want: 5},
+	} {
+		if got := contextConvergenceThreshold(test.hard, test.ratio); got != test.want {
+			t.Fatalf("contextConvergenceThreshold(%d, %v) = %d, want %d", test.hard, test.ratio, got, test.want)
+		}
+	}
+}
+
+func TestRunnerStopsDispatchBeforeProjectedTokenBudgetOverrun(t *testing.T) {
+	first := reviewTestFile()
+	second := reviewTestFile()
+	second.Path = "second.go"
+	cfg := config.Default()
+	cfg.Review.Concurrency = 1
+	cfg.Review.MaxTokensBudget = estimateReviewChunkTokens(first)
+	llm := &recordingLLM{responses: []protocol.Response{
+		withUsage(doneResponse(), agent.TokenUsage{PromptTokens: 80, CompletionTokens: 20, TotalTokens: 100}),
+		doneResponse(),
+	}}
+	r := Runner{Root: t.TempDir(), Config: cfg, Git: fakeGit{files: []gitdiff.FileDiff{first, second}}, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, RuleResolver: testRuleResolver()}
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Incomplete || report.ExitCode != agent.ExitIncomplete || len(llm.requests) != 1 || report.Usage.TotalTokens != 100 {
+		t.Fatalf("token budget did not stop projected overrun: report=%+v requests=%d", report, len(llm.requests))
+	}
+	if len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "token_budget_reached: second.go") {
+		t.Fatalf("token budget warning missing: %+v", report.Warnings)
+	}
+}
+
+func TestMainLoopAcceptsBatchedCommentsAndEndsWithoutTaskDone(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "dep.go"), []byte("package dep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file := reviewTestFile()
+	cfg := config.Default()
+	cfg.Review.MaxContextToolCalls = 1
+	findings := []agent.Finding{
+		{Severity: "high", Category: "correctness", Title: "first", Problem: "first problem", Evidence: "first evidence", Suggestion: "first suggestion", Confidence: 0.9},
+		{Severity: "medium", Category: "tests", Title: "second", Problem: "second problem", Evidence: "second evidence", Suggestion: "second suggestion", Confidence: 0.85},
+	}
+	arguments, _ := json.Marshal(map[string]any{"findings": findings})
+	llm := &recordingLLM{responses: []protocol.Response{
+		toolResponse("read", "file_read", `{"file_path":"dep.go","start_line":1,"end_line":1}`),
+		toolResponse("comments", "code_comment", string(arguments)),
+		doneResponse(),
+	}}
+	r := Runner{Root: root, Config: cfg, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	got, warnings, err := r.runMainLoop(context.Background(), file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), 1, &usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(got) != 2 || len(llm.requests) != 2 {
+		t.Fatalf("batched comments should complete the main loop in one finalization call: findings=%+v warnings=%v requests=%d", got, warnings, len(llm.requests))
+	}
+	for _, finding := range got {
+		if finding.File != file.Path {
+			t.Fatalf("batched finding was not scoped to the current file: %+v", finding)
+		}
+	}
+	calls := r.process.snapshot().ToolCalls
+	if len(calls) != 2 || calls[1].Tool != "code_comment" || len(calls[1].Arguments.Findings) != 2 {
+		t.Fatalf("batched code_comment was not audited correctly: %+v", calls)
+	}
+}
+
+func TestMainLoopRejectsForeignFileFindingsWithoutDiscardingCurrentFindings(t *testing.T) {
+	file := reviewTestFile()
+	findings := []agent.Finding{
+		{Severity: "high", Category: "correctness", File: "./main.go", Title: "current", Problem: "current problem", Evidence: "current evidence", Suggestion: "current suggestion", Confidence: 0.9},
+		{Severity: "medium", Category: "correctness", File: "other.go", Title: "foreign", Problem: "foreign problem", Evidence: "foreign evidence", Suggestion: "foreign suggestion", Confidence: 0.9},
+	}
+	arguments, _ := json.Marshal(map[string]any{"findings": findings})
+	llm := &recordingLLM{responses: []protocol.Response{{ToolCalls: []protocol.ToolCall{
+		{ID: "comments", Name: "code_comment", Arguments: string(arguments)},
+		{ID: "done", Name: "task_done", Arguments: `{}`},
+	}}}}
+	r := Runner{Root: t.TempDir(), Config: config.Default(), DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	got, warnings, err := r.runMainLoop(context.Background(), file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), 1, &usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(got) != 1 || got[0].File != file.Path || got[0].Title != "current" || len(llm.requests) != 1 {
+		t.Fatalf("mixed batch must retain only current-file findings: findings=%+v warnings=%v requests=%d", got, warnings, len(llm.requests))
+	}
+	calls := r.process.snapshot().ToolCalls
+	if len(calls) != 1 || calls[0].Status != "success" || len(calls[0].Arguments.Findings) != 2 || calls[0].Arguments.Findings[0].File != file.Path || calls[0].Arguments.Findings[1].File != "other.go" || !strings.Contains(calls[0].Output, "Rejected 1 finding(s) targeting other files") {
+		t.Fatalf("foreign finding rejection was not audited: %+v", calls)
+	}
+}
+
+func TestMainLoopRejectsCodeCommentWhenEveryFindingTargetsAnotherFile(t *testing.T) {
+	file := reviewTestFile()
+	finding := agent.Finding{Severity: "high", Category: "correctness", File: "other.go", Title: "foreign", Problem: "foreign problem", Evidence: "foreign evidence", Suggestion: "foreign suggestion", Confidence: 0.9}
+	arguments, _ := json.Marshal(map[string]any{"finding": finding})
+	llm := &recordingLLM{responses: []protocol.Response{{ToolCalls: []protocol.ToolCall{
+		{ID: "comment", Name: "code_comment", Arguments: string(arguments)},
+		{ID: "done", Name: "task_done", Arguments: `{}`},
+	}}}}
+	r := Runner{Root: t.TempDir(), Config: config.Default(), DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	got, warnings, err := r.runMainLoop(context.Background(), file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), 1, &usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(got) != 0 || len(llm.requests) != 1 {
+		t.Fatalf("foreign-only code_comment must be rejected without affecting task completion: findings=%+v warnings=%v requests=%d", got, warnings, len(llm.requests))
+	}
+	calls := r.process.snapshot().ToolCalls
+	if len(calls) != 1 || calls[0].Status != "error" || calls[0].Summary != "foreign-file findings rejected" || !strings.Contains(calls[0].Output, `current file "main.go"`) {
+		t.Fatalf("foreign-only rejection was not audited: %+v", calls)
+	}
+}
+
+func TestMainLoopRequiresExplicitDoneAfterCommentsBeforeFinalization(t *testing.T) {
+	file := reviewTestFile()
+	finding := agent.Finding{Severity: "high", Category: "correctness", Title: "issue", Problem: "problem", Evidence: "evidence", Suggestion: "suggestion", Confidence: 0.9}
+	arguments, _ := json.Marshal(map[string]any{"findings": []agent.Finding{finding}})
+	llm := &recordingLLM{responses: []protocol.Response{
+		toolResponse("comments", "code_comment", string(arguments)),
+		doneResponse(),
+	}}
+	r := Runner{Root: t.TempDir(), Config: config.Default(), DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	got, warnings, err := r.runMainLoop(context.Background(), file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), 1, &usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(warnings) != 0 || len(got) != 1 || len(llm.requests) != 2 {
+		t.Fatalf("ordinary code_comment must continue until explicit task_done: findings=%+v warnings=%v requests=%d", got, warnings, len(llm.requests))
+	}
+	if !llm.requests[1].RequireTool || !requestContains(llm.requests[1], "call task_done now") || !requestContains(llm.requests[1], "Do not begin a new investigation") {
+		t.Fatalf("comment result did not steer the model to task_done: %+v", llm.requests[1])
+	}
+}
+
 func TestRunnerCachesIdenticalContextToolCallsWithoutSpendingBudget(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "dep.go"), []byte("package dep\n"), 0o600); err != nil {
@@ -338,6 +614,39 @@ func TestRunnerCachesIdenticalContextToolCallsWithoutSpendingBudget(t *testing.T
 	}
 }
 
+func TestMainLoopDoesNotReinjectOrChargeRepeatedChangedDiffPaths(t *testing.T) {
+	current := reviewTestFile()
+	first := gitdiff.FileDiff{Path: "first.go", Hunks: []gitdiff.Hunk{{
+		NewStart: 1, NewLines: 1, Lines: []gitdiff.Line{{Kind: '+', NewLine: 1, Text: "const first = true"}}, ChangedLines: map[int]bool{1: true},
+	}}}
+	second := gitdiff.FileDiff{Path: "second.go", Hunks: []gitdiff.Hunk{{
+		NewStart: 1, NewLines: 1, Lines: []gitdiff.Line{{Kind: '+', NewLine: 1, Text: "const second = true"}}, ChangedLines: map[int]bool{1: true},
+	}}}
+	llm := &recordingLLM{responses: []protocol.Response{
+		toolResponse("diff-1", "changed_diff_read", `{"file_paths":["first.go"]}`),
+		toolResponse("diff-2", "changed_diff_read", `{"file_paths":["first.go"]}`),
+		toolResponse("diff-3", "changed_diff_read", `{"file_paths":["second.go"]}`),
+		doneResponse(),
+	}}
+	cfg := config.Default()
+	r := Runner{Root: t.TempDir(), Config: cfg, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	_, warnings, err := r.runMainLoop(context.Background(), current, []gitdiff.FileDiff{current, first, second}, mainLoopTestValues(current), 1, &usage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := r.process.snapshot().ToolCalls
+	if len(warnings) != 0 || len(calls) != 3 || calls[0].Cached || !calls[1].Cached || calls[2].Cached {
+		t.Fatalf("changed diff path deduplication was not audited correctly: warnings=%v calls=%+v", warnings, calls)
+	}
+	if strings.Contains(calls[1].Output, "==== CHANGED DIFF:") || !strings.Contains(calls[1].Output, "already provided") {
+		t.Fatalf("repeated changed diff content was reinjected: %+v", calls[1])
+	}
+	if len(llm.requests) != 4 || llm.requests[3].RequireTool || len(llm.requests[3].Tools) != 5 {
+		t.Fatalf("repeated changed diff should not spend context budget and exhausted tool should be removed: %+v", llm.requests[3])
+	}
+}
+
 func TestRunnerStopsAfterThreeEmptyToolRounds(t *testing.T) {
 	file := gitdiff.FileDiff{Path: "main.go", Hunks: []gitdiff.Hunk{{ChangedLines: map[int]bool{1: true}}}}
 	cfg := config.Default()
@@ -363,6 +672,10 @@ func TestToolProgressLabelShowsSearchAndScope(t *testing.T) {
 	read := agent.ToolCall{Tool: "file_read", Arguments: agent.ToolArguments{FilePath: "pkg/service.go", StartLine: 20, EndLine: 80}}
 	if got := toolProgressLabel(read); got != `file_read "pkg/service.go"` {
 		t.Fatalf("unexpected file read label %q", got)
+	}
+	changedDiff := agent.ToolCall{Tool: "changed_diff_read", Arguments: agent.ToolArguments{FilePaths: []string{"a.go", "b.go"}}}
+	if got := toolProgressLabel(changedDiff); got != `changed_diff_read ["a.go","b.go"]` {
+		t.Fatalf("unexpected changed diff label %q", got)
 	}
 	search := agent.ToolCall{Tool: "code_search", Arguments: agent.ToolArguments{SearchText: "type TestSuite struct", FilePatterns: []string{"*.go", ":(exclude)*_test.go"}}}
 	if got := toolProgressLabel(search); got != `code_search "type TestSuite struct" in ["*.go",":(exclude)*_test.go"]` {
@@ -811,8 +1124,14 @@ func TestMainPromptSeparatesTrustedInstructionsFromRepositoryData(t *testing.T) 
 	if strings.Contains(llm.requests[0].Messages[0].Content, "UNTRUSTED_RULE_DATA") || !strings.Contains(llm.requests[0].Messages[1].Content, "UNTRUSTED_RULE_DATA") || !strings.Contains(llm.requests[0].Messages[1].Content, `panic("x")`) {
 		t.Fatalf("repository data crossed the system/user boundary: %+v", llm.requests[0].Messages)
 	}
-	if len(llm.requests[0].Tools) != 5 {
-		t.Fatalf("expected five native tools, got %+v", llm.requests[0].Tools)
+	if len(llm.requests[0].Tools) != 6 {
+		t.Fatalf("expected six native tools, got %+v", llm.requests[0].Tools)
+	}
+	if llm.requests[0].Tools[0].Name != "task_done" || llm.requests[0].Tools[1].Name != "code_comment" {
+		t.Fatalf("terminal tools must be listed first to bias completion: %+v", llm.requests[0].Tools)
+	}
+	if !strings.Contains(llm.requests[0].Messages[0].Content, "make one completion-oriented decision") || !strings.Contains(llm.requests[0].Messages[0].Content, "call task_done immediately") || !strings.Contains(llm.requests[0].Messages[0].Content, "task_done is the preferred action") || !strings.Contains(llm.requests[0].Messages[0].Content, "Do not inspect context merely to be exhaustive") {
+		t.Fatalf("main prompt is missing the bounded decision protocol: %s", llm.requests[0].Messages[0].Content)
 	}
 }
 
@@ -846,6 +1165,74 @@ func TestRunnerRelocatesFinding(t *testing.T) {
 	}
 	if len(report.Findings) != 1 || report.Findings[0].StartLine != 10 || report.Usage.LLMRequests != 3 {
 		t.Fatalf("finding was not relocated: %+v", report)
+	}
+}
+
+func TestPositionFindingDoesNotTrustOverlappingLinesWhenExistingCodeMismatches(t *testing.T) {
+	file := reviewTestFile()
+	llm := &recordingLLM{responses: []protocol.Response{{Text: `{"existing_code":"panic(\"x\")"}`}}}
+	r := Runner{Root: t.TempDir(), Config: config.Default(), LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	finding := agent.Finding{File: file.Path, StartLine: 10, EndLine: 10, ExistingCode: "not in the diff"}
+	got, ok, warning := r.positionFinding(context.Background(), finding, file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), &usage, true)
+	if !ok || warning != "" || got.StartLine != 10 || got.EndLine != 10 || got.ExistingCode != `panic("x")` || len(llm.requests) != 1 || usage.LLMRequests != 1 {
+		t.Fatalf("mismatched existing_code must relocate instead of trusting coincident lines: finding=%+v ok=%t warning=%q requests=%d usage=%+v", got, ok, warning, len(llm.requests), usage)
+	}
+}
+
+func TestPositionFindingDropsExistingCodeOwnedByAnotherChangedFileWithoutRelocation(t *testing.T) {
+	file := reviewTestFile()
+	other := gitdiff.FileDiff{Path: "other.go", Hunks: []gitdiff.Hunk{{
+		NewStart: 20, NewLines: 1, ChangedLines: map[int]bool{20: true},
+		Lines: []gitdiff.Line{{Kind: '+', NewLine: 20, Text: "return foreignResult"}},
+	}}}
+	llm := &recordingLLM{}
+	r := Runner{Root: t.TempDir(), Config: config.Default(), LLM: llm, process: newProcessRecorder(time.Now())}
+	usage := agent.TokenUsage{}
+	finding := agent.Finding{File: file.Path, StartLine: 10, EndLine: 10, ExistingCode: "return foreignResult"}
+	_, ok, warning := r.positionFinding(context.Background(), finding, file, []gitdiff.FileDiff{file, other}, mainLoopTestValues(file), &usage, true)
+	if ok || warning != "" || len(llm.requests) != 0 || usage.LLMRequests != 0 {
+		t.Fatalf("obvious foreign-file snippet must be dropped before relocation: ok=%t warning=%q requests=%d usage=%+v", ok, warning, len(llm.requests), usage)
+	}
+}
+
+func TestRunnerRepairsInvalidRelocationResponse(t *testing.T) {
+	file := reviewTestFile()
+	llm := &recordingLLM{responses: []protocol.Response{
+		commentAndDoneResponse(agent.Finding{Severity: "high", Category: "correctness", File: "main.go", StartLine: 99, EndLine: 99, Title: "panic", Problem: "panic added", Evidence: "panic", Suggestion: "return error", Confidence: 0.95}),
+		{Text: `not valid JSON`},
+		{Text: `{"existing_code":"panic(\"x\")"}`},
+		{Text: `[]`},
+	}}
+	cfg := config.Default()
+	cfg.Output.Language = "English"
+	r := Runner{Root: t.TempDir(), Config: cfg, Git: fakeGit{files: []gitdiff.FileDiff{file}}, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, RuleResolver: testRuleResolver()}
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Incomplete || len(report.Warnings) != 0 || len(report.Findings) != 1 || report.Findings[0].StartLine != 10 || report.Usage.LLMRequests != 4 {
+		t.Fatalf("invalid relocation response was not repaired: %+v", report)
+	}
+	if len(llm.requests) != 4 || !requestContains(llm.requests[2], "Return only one complete JSON object") || !requestContains(llm.requests[2], "not valid JSON") {
+		t.Fatalf("relocation repair request did not preserve and correct the invalid response: %+v", llm.requests)
+	}
+}
+
+func TestRunnerReportsInvalidRelocationAfterRepairFails(t *testing.T) {
+	file := reviewTestFile()
+	llm := &recordingLLM{responses: []protocol.Response{
+		commentAndDoneResponse(agent.Finding{Severity: "medium", Category: "correctness", File: "main.go", StartLine: 99, EndLine: 99, Title: "candidate", Problem: "candidate", Evidence: "candidate", Suggestion: "candidate", Confidence: 0.9}),
+		{Text: `not valid JSON`},
+		{Text: `still not valid JSON`},
+	}}
+	r := Runner{Root: t.TempDir(), Config: config.Default(), Git: fakeGit{files: []gitdiff.FileDiff{file}}, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, RuleResolver: testRuleResolver()}
+	report, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Incomplete || report.ExitCode != agent.ExitIncomplete || len(report.Findings) != 0 || len(report.Warnings) != 1 || report.Warnings[0] != "relocation_invalid_response: "+file.Path || report.Usage.LLMRequests != 3 {
+		t.Fatalf("failed relocation repair must remain visible: %+v", report)
 	}
 }
 
@@ -905,6 +1292,17 @@ func reviewTestFile() gitdiff.FileDiff {
 		NewStart: 10, NewLines: 1, ChangedLines: map[int]bool{10: true},
 		Lines: []gitdiff.Line{{Kind: '+', NewLine: 10, Text: `panic("x")`}},
 	}}}
+}
+
+func mainLoopTestValues(file gitdiff.FileDiff) map[string]string {
+	return map[string]string{
+		"current_file_path": file.Path,
+		"change_files":      "(none)",
+		"system_rule":       "test rule",
+		"diff":              renderFileDiff(file),
+		"language":          "English",
+		"plan_guidance":     "No separate plan was required.",
+	}
 }
 
 func testRuleResolver() rules.Resolver {
