@@ -28,6 +28,7 @@ model:
 output:
   json: out.json
   markdown: out.md
+  debug: trace.jsonl
   language: en-US
   progress: true
 `), 0o600)
@@ -38,7 +39,7 @@ output:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Review.Concurrency != 2 || cfg.Review.ContextConvergenceRatio != 0.8 || cfg.Review.MaxTokensBudget != 50000 || cfg.Output.Language != "en-US" || !cfg.Output.Progress {
+	if cfg.Review.Concurrency != 2 || cfg.Review.ContextConvergenceRatio != 0.8 || cfg.Review.MaxTokensBudget != 50000 || cfg.Output.Debug != "trace.jsonl" || cfg.Output.Language != "en-US" || !cfg.Output.Progress {
 		t.Fatalf("unexpected review config: %+v", cfg.Review)
 	}
 	if cfg.Model.Protocol != "anthropic" || cfg.Model.APIKey != "test-key" {
@@ -93,6 +94,20 @@ func TestMaxTokensBudgetSetGetAndValidation(t *testing.T) {
 		if err := Set(&cfg, "review.max_tokens_budget", value); err == nil {
 			t.Fatalf("expected invalid token budget %q to fail", value)
 		}
+	}
+}
+
+func TestDebugOutputSetGetAndRender(t *testing.T) {
+	cfg := Default()
+	if err := Set(&cfg, "output.debug", "llm-debug.jsonl"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Get(cfg, "output.debug")
+	if err != nil || got != "llm-debug.jsonl" {
+		t.Fatalf("unexpected debug output %q: %v", got, err)
+	}
+	if !strings.Contains(Render(cfg), "debug: llm-debug.jsonl") {
+		t.Fatalf("render omitted debug output:\n%s", Render(cfg))
 	}
 }
 

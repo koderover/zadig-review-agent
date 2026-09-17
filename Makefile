@@ -4,7 +4,7 @@ VERSION ?= dev
 IMAGE ?= koderover.tencentcloudcr.com/koderover-public/zadig-review-agent
 PLATFORMS ?= linux/amd64,linux/arm64
 COMMIT ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
-BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+BUILD_DATE ?= $(shell TZ=Asia/Shanghai date '+%Y-%m-%dT%H:%M:%S+08:00')
 VERSION_PACKAGE := github.com/koderover/zadig-review-agent/internal/version
 LDFLAGS := -s -w -X $(VERSION_PACKAGE).Version=$(VERSION) -X $(VERSION_PACKAGE).Commit=$(COMMIT) -X $(VERSION_PACKAGE).Date=$(BUILD_DATE)
 

@@ -33,6 +33,7 @@ type Runner struct {
 	HeadSHA       string
 	Progress      func(string, ...any)
 	Started       func(agent.Report)
+	Debug         *LLMDebugRecorder
 	process       *processRecorder
 	showFileLabel bool
 }
@@ -48,6 +49,7 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 		now = time.Now
 	}
 	started := now()
+	r.Debug.start(started)
 	r.process = newProcessRecorder(started)
 	defer func() {
 		report.DurationMS = elapsedMilliseconds(now().Sub(started))

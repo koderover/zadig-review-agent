@@ -332,7 +332,7 @@ Review Filter 完成后，如果输出语言不是 English，Reviewer 使用独�
 -> home-developer-projects-zadig
 ```
 
-Review ID 使用 UTC 秒级时间戳和 diff 标识；同一秒冲突时追加 `-2`、`-3`。已有报告不迁移。相对 `output.json` 和 `output.markdown` 写入本次 review 目录，绝对路径直接使用。报告权限为 `0600`。
+Review ID 使用 UTC 秒级时间戳和 diff 标识；同一秒冲突时追加 `-2`、`-3`。已有报告不迁移。相对 `output.json`、`output.markdown` 和可选 LLM Debug 路径写入本次 review 目录，绝对路径直接使用。报告和 Debug 日志权限均为 `0600`。
 
 JSON 顶层保存 metadata、stats、findings、excluded_files、resolved_rules、warnings、errors、usage、duration_ms 和 process。Markdown 保存可读摘要、finding、规则和轻量工具索引。`process.compressions` 记录每次压缩的文件、轮次、状态、压缩前后估算 Token、消息数量、耗时、错误和独立 Usage。`process.model_responses` 保存 Plan、上下文压缩、Relocation、Review Filter 和 Localization 的阶段、尝试次数、原始文本、结束原因、耗时、错误及 Usage，用于定位空响应、截断和结构错误；该详细信息不输出到控制台或 Markdown。
 
@@ -361,6 +361,8 @@ Progress 默认开启并写入 stderr，正式报告写入 stdout。输出顺序
 ```
 
 `process.tool_calls` 记录调用 ID、文件、轮次、完整参数、耗时、状态、原始输出字节数、截断标记、摘要和受限后的工具输出。
+
+LLM Debug 默认关闭。`--debug` 在本次 review 目录写入便于人类阅读的 `llm-debug.md`；`--debug-file` 或 `output.debug` 可指定其他路径。Markdown 会把每次实际 Provider 调用（包括重试）的 Request 和 Response 按 ID 配对成一个独立章节，覆盖 Plan、Main Review、Memory Compression、Relocation、Review Filter 和 Localization。每个章节分区展示阶段、文件、序号、底层重试次数、时间、估算 Token、标准化消息/工具、标准化响应、Usage、结束原因和错误。指定 `.jsonl` 扩展名时则输出紧凑的机器可读事件流。两种格式都不会包含 API Key，但会包含完整 Prompt、Diff、仓库工具结果和模型输出，必须按敏感源码文件保护。
 
 ## 11. 完整性与退出码
 

@@ -117,6 +117,18 @@ ZADIG_REVIEW_MODEL_API_KEY
 
 `config show` 会隐藏 API Key。`config get model.api_key` 会按设计返回真实值，请勿在日志中调用它。
 
+需要诊断模型行为时，可开启完整 LLM 请求/响应日志：
+
+```bash
+zadig-review-agent review --debug
+# 或指定路径
+zadig-review-agent review --debug-file "$PWD/llm-debug.md"
+# 需要程序处理时仍可选择 JSONL
+zadig-review-agent review --debug-file "$PWD/llm-debug.jsonl"
+```
+
+`--debug` 默认在本次 review 报告目录生成便于人类阅读的 `llm-debug.md`：每次实际调用按 ID 将 Request 和 Response 配对，分区展示调用阶段、文件、轮次、耗时、消息、工具、Token 和错误；失败后的重试会作为独立调用展示。显式指定 `.jsonl` 扩展名时输出适合程序处理的事件流。日志包含完整 Prompt、Diff、工具参数、工具结果和模型响应，权限为 `0600`，请按敏感源码处理。也可通过 `output.debug` 配置路径；空值表示关闭。
+
 ## 审查规则
 
 规则是不能执行代码的声明式 JSON 数据，按以下顺序加载：
@@ -159,7 +171,7 @@ zadig-review-agent review \
 ## 隐私与安全
 
 - Diff、规则文本以及通过只读工具获取的仓库内容会发送到你配置的模型 Endpoint。处理敏感代码前，请确认模型服务商的数据政策。
-- JSON 报告为便于诊断会保存详细工具输出和模型原始响应，其中可能包含源码。报告和配置文件会以受限权限创建，但仍应按你的安全策略进行保护、保留和删除。
+- JSON 报告为便于诊断会保存详细工具输出和模型原始响应；Debug 日志还会保存完整 LLM 请求，其中可能包含源码。报告和配置文件会以受限权限创建，但仍应按你的安全策略进行保护、保留和删除。
 - Agent 不向模型提供 Shell、网络或文件写入工具，也不执行仓库提供的命令或配置。
 - API Key 不会进入 Prompt 或报告。CI 中建议使用环境变量或密钥管理服务。
 - 本项目不包含遥测服务。

@@ -135,6 +135,7 @@ type Metadata struct {
 	ReportDir  string `json:"report_dir,omitempty"`
 	JSONReport string `json:"json_report,omitempty"`
 	MDReport   string `json:"markdown_report,omitempty"`
+	DebugLog   string `json:"debug_log,omitempty"`
 }
 
 type Stats struct {

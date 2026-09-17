@@ -247,13 +247,15 @@ For example:
 -> home-developer-projects-zadig
 ```
 
-Review IDs use a UTC second timestamp plus diff identity, with `-2`, `-3`, and so on for collisions. Existing reports are not migrated. Relative JSON and Markdown paths are placed in the per-review directory; absolute paths are used directly. Reports have mode `0600`.
+Review IDs use a UTC second timestamp plus diff identity, with `-2`, `-3`, and so on for collisions. Existing reports are not migrated. Relative JSON, Markdown, and optional LLM debug paths are placed in the per-review directory; absolute paths are used directly. Reports and debug logs have mode `0600`.
 
 JSON contains metadata, stats, findings, excluded files, resolved rules, warnings, errors, usage, duration, and process details. Markdown contains a readable summary, findings, rules, and a lightweight tool index. Compression and model-response records include stage, attempts, status, timing, raw text/error, finish reason, and independent usage. Detailed raw process data is excluded from console and Markdown output.
 
 Provider responses are the sole source of token usage. Total falls back to prompt plus completion if absent. Every request, including failure and retry, is counted. Supported cache-read and cache-write counters are preserved.
 
 Progress is enabled by default and written to stderr; final output goes to stdout. Full tool arguments and bounded output are stored only in JSON process records.
+
+LLM debug logging is disabled by default. `--debug` writes the human-readable `llm-debug.md` in the per-review directory; `--debug-file` or `output.debug` selects another path. Markdown groups each actual provider attempt into a call section and pairs its Request and Response, including retries, across Plan, Main Review, Memory Compression, Relocation, Review Filter, and Localization. Each section displays stage, file, sequence, transport-attempt number, timing, estimated tokens, normalized messages/tools, normalized response, usage, finish reason, and errors. A `.jsonl` suffix selects the compact machine-readable request/response event stream. Both formats deliberately exclude the API key but include full prompts, diffs, repository tool results, and model output, so they must be handled as sensitive source data.
 
 ## 11. Completeness and exit codes
 

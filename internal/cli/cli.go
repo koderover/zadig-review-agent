@@ -75,6 +75,8 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	modelTimeout := fs.String("model-timeout", "", "model timeout, e.g. 120s")
 	jsonOut := fs.String("output-json", "", "json report path")
 	mdOut := fs.String("output-md", "", "markdown report path")
+	debug := fs.Bool("debug", false, "record full normalized LLM requests and responses (may contain source code)")
+	debugFile := fs.String("debug-file", "", "LLM request/response log path (.jsonl selects machine-readable output); implies --debug")
 	console := fs.String("console", "", "console output mode: detailed, summary, none")
 	progress := fs.Bool("progress", false, "print review progress to stderr (use --progress=false to disable)")
 	if err := fs.Parse(args); err != nil {
@@ -105,10 +107,16 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		modelTimeout:            *modelTimeout,
 		jsonOut:                 *jsonOut,
 		mdOut:                   *mdOut,
+		debug:                   *debug,
+		debugFile:               *debugFile,
 		console:                 *console,
 		progress:                *progress,
 	}); err != nil {
 		return agent.ExitIncomplete, err
+	}
+	var debugRecorder *reviewer.LLMDebugRecorder
+	if cfg.Output.Debug != "" {
+		debugRecorder = reviewer.NewLLMDebugRecorder()
 	}
 	gitClient := gitdiff.Client{Dir: "."}
 	repoRoot, err := gitClient.Root(ctx)
@@ -134,6 +142,9 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 			return agent.ExitIncomplete, err
 		}
 		if err := prepareReportOutput(&report, &cfg); err != nil {
+			return agent.ExitIncomplete, err
+		}
+		if err := debugRecorder.WriteFile(cfg.Output.Debug); err != nil {
 			return agent.ExitIncomplete, err
 		}
 		if cfg.Output.Progress {
@@ -165,6 +176,7 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		RuleResolver: resolver,
 		DiffRequest:  diffReq,
 		Progress:     progressLog,
+		Debug:        debugRecorder,
 		Started: func(report agent.Report) {
 			if cfg.Output.Progress {
 				_, _ = io.WriteString(stderr, reporter.ConsoleStart(report))
@@ -176,6 +188,9 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 		return agent.ExitIncomplete, err
 	}
 	if err := prepareReportOutput(&report, &cfg); err != nil {
+		return agent.ExitIncomplete, err
+	}
+	if err := debugRecorder.WriteFile(cfg.Output.Debug); err != nil {
 		return agent.ExitIncomplete, err
 	}
 	writeReport := reporter.Write
@@ -454,17 +469,30 @@ func prepareReportOutput(report *agent.Report, cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	debugPath, err := resolveReportPath(cfg.Output.Debug, runDir)
+	if err != nil {
+		return err
+	}
+	if debugPath != "" && (sameOutputPath(debugPath, jsonPath) || sameOutputPath(debugPath, markdownPath)) {
+		return fmt.Errorf("debug output path must differ from JSON and Markdown report paths")
+	}
 	cfg.Output.JSON = jsonPath
 	cfg.Output.Markdown = markdownPath
+	cfg.Output.Debug = debugPath
 	report.Metadata.ReportDir = runDir
 	report.Metadata.JSONReport = jsonPath
 	report.Metadata.MDReport = markdownPath
-	if jsonPath != "" || markdownPath != "" {
+	report.Metadata.DebugLog = debugPath
+	if jsonPath != "" || markdownPath != "" || debugPath != "" {
 		if err := os.MkdirAll(runDir, 0o700); err != nil {
 			return fmt.Errorf("create report dir: %w", err)
 		}
 	}
 	return nil
+}
+
+func sameOutputPath(left, right string) bool {
+	return left != "" && right != "" && filepath.Clean(left) == filepath.Clean(right)
 }
 
 func resolveReportPath(path, runDir string) (string, error) {
@@ -593,6 +621,8 @@ type cliOverrides struct {
 	modelTimeout            string
 	jsonOut                 string
 	mdOut                   string
+	debug                   bool
+	debugFile               string
 	console                 string
 	progress                bool
 }
@@ -693,6 +723,21 @@ func applyCLIOverrides(cfg *config.Config, visited map[string]bool, o cliOverrid
 	}
 	if visited["output-md"] {
 		cfg.Output.Markdown = o.mdOut
+	}
+	if visited["debug"] {
+		if o.debug {
+			if cfg.Output.Debug == "" {
+				cfg.Output.Debug = "llm-debug.md"
+			}
+		} else {
+			cfg.Output.Debug = ""
+		}
+	}
+	if visited["debug-file"] {
+		if strings.TrimSpace(o.debugFile) == "" {
+			return fmt.Errorf("--debug-file must not be empty")
+		}
+		cfg.Output.Debug = strings.TrimSpace(o.debugFile)
 	}
 	if visited["console"] {
 		if !validConsoleMode(o.console) {

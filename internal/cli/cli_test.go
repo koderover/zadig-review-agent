@@ -127,7 +127,7 @@ func TestReviewPreviewDoesNotNeedModel(t *testing.T) {
 	}
 	repoRoot := strings.TrimSpace(gitOut(t, "rev-parse", "--show-toplevel"))
 	var stdout, stderr bytes.Buffer
-	code, err := Run(context.Background(), []string{"review", "--from", base, "--to", "HEAD", "--rule", rulePath, "--preview"}, &stdout, &stderr)
+	code, err := Run(context.Background(), []string{"review", "--from", base, "--to", "HEAD", "--rule", rulePath, "--preview", "--debug"}, &stdout, &stderr)
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v stderr=%s", code, err, stderr.String())
 	}
@@ -149,11 +149,19 @@ func TestReviewPreviewDoesNotNeedModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(jsonReports) != 1 || len(markdownReports) != 1 {
-		t.Fatalf("expected one json and one markdown report, got json=%v markdown=%v", jsonReports, markdownReports)
+	debugLogs, err := filepath.Glob(filepath.Join(home, ".zadig-review-agent", "reports", repository, "*", "llm-debug.md"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if filepath.Dir(jsonReports[0]) != filepath.Dir(markdownReports[0]) {
-		t.Fatalf("expected reports in the same per-review dir, got json=%s markdown=%s", jsonReports[0], markdownReports[0])
+	if len(jsonReports) != 1 || len(markdownReports) != 1 || len(debugLogs) != 1 {
+		t.Fatalf("expected one json, markdown, and debug output, got json=%v markdown=%v debug=%v", jsonReports, markdownReports, debugLogs)
+	}
+	if filepath.Dir(jsonReports[0]) != filepath.Dir(markdownReports[0]) || filepath.Dir(jsonReports[0]) != filepath.Dir(debugLogs[0]) {
+		t.Fatalf("expected outputs in the same per-review dir, got json=%s markdown=%s debug=%s", jsonReports[0], markdownReports[0], debugLogs[0])
+	}
+	debugData, err := os.ReadFile(debugLogs[0])
+	if err != nil || !strings.Contains(string(debugData), "# LLM Debug Log") || !strings.Contains(string(debugData), "_No LLM requests were made._") {
+		t.Fatalf("preview debug log must be human-readable: err=%v\n%s", err, debugData)
 	}
 	data, err := os.ReadFile(jsonReports[0])
 	if err != nil {
@@ -184,6 +192,23 @@ func TestAvailableReportRunDirAvoidsCollision(t *testing.T) {
 	}
 	if got, want := availableReportRunDir(preferred), preferred+"-2"; got != want {
 		t.Fatalf("unexpected collision path: got %q want %q", got, want)
+	}
+}
+
+func TestPrepareReportOutputRejectsDebugPathCollision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	report := agent.Report{Metadata: agent.Metadata{
+		DiffMode:   "workspace",
+		Repository: "/home/developer/projects/zadig",
+	}}
+	cfg := config.Default()
+	cfg.Output.JSON = "review.jsonl"
+	cfg.Output.Markdown = "review.md"
+	cfg.Output.Debug = "review.jsonl"
+
+	err := prepareReportOutput(&report, &cfg)
+	if err == nil || !strings.Contains(err.Error(), "debug output path must differ") {
+		t.Fatalf("expected a debug/report path collision error, got %v", err)
 	}
 }
 
@@ -317,6 +342,8 @@ func TestApplyCLIOverrides(t *testing.T) {
 		"model-timeout":             true,
 		"output-json":               true,
 		"output-md":                 true,
+		"debug":                     true,
+		"debug-file":                true,
 		"console":                   true,
 		"progress":                  true,
 	}
@@ -337,6 +364,8 @@ func TestApplyCLIOverrides(t *testing.T) {
 		modelTimeout:            "45s",
 		jsonOut:                 "out.json",
 		mdOut:                   "out.md",
+		debug:                   true,
+		debugFile:               "trace.jsonl",
 		console:                 "none",
 		progress:                true,
 	})
@@ -352,7 +381,7 @@ func TestApplyCLIOverrides(t *testing.T) {
 	if cfg.Model.Protocol != "anthropic" || cfg.Model.Name != "claude-test" || cfg.Model.Endpoint != "https://example.test/v1" || cfg.Model.Timeout != 45*time.Second {
 		t.Fatalf("unexpected model overrides: %+v", cfg.Model)
 	}
-	if cfg.Output.JSON != "out.json" || cfg.Output.Markdown != "out.md" || cfg.Output.Console != "none" || !cfg.Output.Progress {
+	if cfg.Output.JSON != "out.json" || cfg.Output.Markdown != "out.md" || cfg.Output.Debug != "trace.jsonl" || cfg.Output.Console != "none" || !cfg.Output.Progress {
 		t.Fatalf("unexpected output overrides: %+v", cfg.Output)
 	}
 }

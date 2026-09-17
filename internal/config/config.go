@@ -40,6 +40,7 @@ type ModelConfig struct {
 type OutputConfig struct {
 	JSON     string
 	Markdown string
+	Debug    string
 	Console  string
 	Language string
 	Progress bool
@@ -69,6 +70,7 @@ func Keys() []KeyInfo {
 		{"model.timeout", "120s", "Model request timeout as a Go duration."},
 		{"output.json", "review-report.json", "JSON report output path. Relative paths are written under each review report dir."},
 		{"output.markdown", "review-report.md", "Markdown report output path. Relative paths are written under each review report dir."},
+		{"output.debug", "", "LLM request/response log path. Markdown is the default format; .jsonl selects machine-readable output. Empty disables logging."},
 		{"output.console", "detailed", "Console output mode: detailed, summary, none."},
 		{"output.language", "zh-CN", "Language for human-readable review finding content."},
 		{"output.progress", "true", "Print review progress to stderr."},
@@ -97,6 +99,7 @@ func Default() Config {
 		Output: OutputConfig{
 			JSON:     "review-report.json",
 			Markdown: "review-report.md",
+			Debug:    "",
 			Console:  "detailed",
 			Language: "zh-CN",
 			Progress: true,
@@ -191,6 +194,7 @@ func render(cfg Config, redact bool) string {
 	fmt.Fprintf(&b, "\noutput:\n")
 	fmt.Fprintf(&b, "  json: %s\n", cfg.Output.JSON)
 	fmt.Fprintf(&b, "  markdown: %s\n", cfg.Output.Markdown)
+	fmt.Fprintf(&b, "  debug: %s\n", cfg.Output.Debug)
 	fmt.Fprintf(&b, "  console: %s\n", cfg.Output.Console)
 	fmt.Fprintf(&b, "  language: %s\n", cfg.Output.Language)
 	fmt.Fprintf(&b, "  progress: %t\n", cfg.Output.Progress)
@@ -285,6 +289,8 @@ func Set(cfg *Config, key, value string) error {
 		cfg.Output.JSON = value
 	case "output.markdown":
 		cfg.Output.Markdown = value
+	case "output.debug":
+		cfg.Output.Debug = value
 	case "output.console":
 		switch value {
 		case "detailed", "summary", "none":
@@ -343,6 +349,8 @@ func Get(cfg Config, key string) (string, error) {
 		return cfg.Output.JSON, nil
 	case "output.markdown":
 		return cfg.Output.Markdown, nil
+	case "output.debug":
+		return cfg.Output.Debug, nil
 	case "output.console":
 		return cfg.Output.Console, nil
 	case "output.language":
@@ -557,6 +565,8 @@ func (p *yamlParser) assign(section, key, value string) error {
 			p.cfg.Output.JSON = value
 		case "markdown":
 			p.cfg.Output.Markdown = value
+		case "debug":
+			p.cfg.Output.Debug = value
 		case "console":
 			p.cfg.Output.Console = value
 		case "language":

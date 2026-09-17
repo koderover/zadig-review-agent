@@ -673,10 +673,11 @@ func (r Runner) completeDiagnosedFrom(ctx context.Context, stage, file, source s
 	started := time.Now()
 	var response protocol.Response
 	var err error
+	debugMeta := llmDebugMeta{stage: stage, file: file, sequence: sequence}
 	if withoutThreshold {
-		response, err = r.completeTrackedWithoutThreshold(ctx, request, usage)
+		response, err = r.completeTrackedWithoutThresholdDebug(ctx, request, usage, debugMeta)
 	} else {
-		response, err = r.completeTracked(ctx, request, usage)
+		response, err = r.completeTrackedDebug(ctx, request, usage, debugMeta)
 	}
 	if err == nil || errors.Is(err, errTokenThreshold) {
 		return response, err
@@ -793,19 +794,34 @@ func existingCodeOwner(existingCode, currentFile string, allFiles []gitdiff.File
 }
 
 func (r Runner) completeTracked(ctx context.Context, request protocol.Request, usage *agent.TokenUsage) (protocol.Response, error) {
+	return r.completeTrackedDebug(ctx, request, usage, llmDebugMeta{})
+}
+
+func (r Runner) completeTrackedDebug(ctx context.Context, request protocol.Request, usage *agent.TokenUsage, debugMeta llmDebugMeta) (protocol.Response, error) {
 	if estimateRequestTokens(request) > r.Config.Review.MaxChunkTokens*4/5 {
 		return protocol.Response{}, errTokenThreshold
 	}
-	return r.completeTrackedWithoutThreshold(ctx, request, usage)
+	return r.completeTrackedWithoutThresholdDebug(ctx, request, usage, debugMeta)
 }
 
 func (r Runner) completeTrackedWithoutThreshold(ctx context.Context, request protocol.Request, usage *agent.TokenUsage) (protocol.Response, error) {
+	return r.completeTrackedWithoutThresholdDebug(ctx, request, usage, llmDebugMeta{})
+}
+
+func (r Runner) completeTrackedWithoutThresholdDebug(ctx context.Context, request protocol.Request, usage *agent.TokenUsage, debugMeta llmDebugMeta) (protocol.Response, error) {
 	var response protocol.Response
 	var err error
 	for attempt := 0; attempt <= maxLLMRetries; attempt++ {
+		pendingDebug, debugErr := r.Debug.begin(debugMeta, attempt+1, r.Config.Model.Protocol, r.Config.Model.Name, request)
+		if debugErr != nil {
+			return response, debugErr
+		}
 		usage.LLMRequests++
 		response, err = r.LLM.Complete(ctx, request)
 		usage.Add(response.Usage)
+		if debugErr := r.Debug.finish(pendingDebug, r.Config.Model.Protocol, r.Config.Model.Name, response, err); debugErr != nil {
+			return response, debugErr
+		}
 		if err == nil || !protocol.IsRetryable(err) || ctx.Err() != nil || attempt == maxLLMRetries {
 			return response, err
 		}

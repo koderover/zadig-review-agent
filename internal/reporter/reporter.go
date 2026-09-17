@@ -166,6 +166,9 @@ func Markdown(report agent.Report) string {
 	if report.Metadata.MDReport != "" {
 		fmt.Fprintf(&b, "- Markdown report: `%s`\n", report.Metadata.MDReport)
 	}
+	if report.Metadata.DebugLog != "" {
+		fmt.Fprintf(&b, "- LLM debug log: `%s`\n", report.Metadata.DebugLog)
+	}
 	fmt.Fprintf(&b, "- Changed files: `%d`\n", report.Stats.ChangedFiles)
 	fmt.Fprintf(&b, "- Chunks: `%d`\n", report.Stats.Chunks)
 	fmt.Fprintf(&b, "- Excluded files: `%d`\n", len(report.ExcludedFiles))
