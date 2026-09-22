@@ -152,14 +152,15 @@ A rule can be inline text or a `.md`, `.txt`, or `.markdown` reference. Custom r
 Files are processed in this order:
 
 1. invalid or escaping path (`invalid_path`)
-2. binary (`binary`)
-3. deleted (`deleted`)
-4. user exclude (`user_exclude`)
-5. user include bypass
-6. unsupported extension or basename (`unsupported_ext`)
-7. default test path (`default_path`)
+2. sensitive path (`sensitive_path`)
+3. binary (`binary`)
+4. deleted (`deleted`)
+5. user exclude (`user_exclude`)
+6. user include bypass
+7. unsupported extension or basename (`unsupported_ext`)
+8. default test path (`default_path`)
 
-Include is a bypass, not an allowlist: it bypasses the extension allowlist and default test exclusion, but never invalid-path, binary, deleted, or user-exclude checks. Built-in basenames include `Dockerfile`, `Makefile`, `pom.xml`, `build.gradle`, `package.json`, and `Cargo.toml`; other files use the extension allowlist.
+Include is a bypass, not an allowlist: it bypasses the extension allowlist and default test exclusion, but never invalid-path, sensitive-path, binary, deleted, or user-exclude checks. Git diff pathspecs and untracked-file guards skip sensitive names before reading contents; a name-status preflight also excludes detected renames from sensitive names. When a sensitive path is deleted, additions in the same diff are skipped because a heavily edited rename may appear as delete and add. Workspace review also skips all untracked files if a tracked sensitive path was deleted relative to `HEAD`, whether or not the deletion is staged. Otherwise ordinary untracked files remain reviewable. Read-only tools block possible rename targets too. The report records them as `sensitive_rename_precaution` and exits incomplete. The same path policy blocks `file_read`, `code_search`, `file_find`, `changed_diff_read`, and rule file references. Built-in basenames include `Dockerfile`, `Makefile`, `pom.xml`, `build.gradle`, `package.json`, and `Cargo.toml`; other files use the extension allowlist.
 
 ## 7. Provider protocol
 

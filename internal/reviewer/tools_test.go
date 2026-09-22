@@ -37,6 +37,104 @@ func TestReadOnlyToolsAndPathBoundary(t *testing.T) {
 	}
 }
 
+func TestContextToolsBlockSensitivePaths(t *testing.T) {
+	root := t.TempDir()
+	gitIn(t, root, "init")
+	gitIn(t, root, "config", "user.email", "test@example.com")
+	gitIn(t, root, "config", "user.name", "Test")
+	gitIn(t, root, "config", "commit.gpgsign", "false")
+	for name, content := range map[string]string{
+		"main.go":           "package main\nconst publicMarker = true\n",
+		".env":              "SECRET_SEARCH_MARKER\n",
+		"private.key":       "SECRET_SEARCH_MARKER\n",
+		"nested/server.pem": "SECRET_SEARCH_MARKER\n",
+		"nested/id_rsa":     "SECRET_SEARCH_MARKER\n",
+		".npmrc":            "SECRET_SEARCH_MARKER\n",
+		".aws/credentials":  "SECRET_SEARCH_MARKER\n",
+		"terraform.tfstate": "SECRET_SEARCH_MARKER\n",
+	} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, root, "add", ".")
+	gitIn(t, root, "commit", "-m", "base")
+	ref := strings.TrimSpace(gitOutputIn(t, root, "rev-parse", "HEAD"))
+	for _, request := range []gitdiff.Request{{Mode: gitdiff.ModeWorkspace}, {Mode: gitdiff.ModeCommit, Commit: ref}} {
+		executor := newToolExecutor(root, request)
+		for _, name := range []string{".env", "private.key", "nested/server.pem", "nested/id_rsa", ".npmrc", ".aws/credentials", "terraform.tfstate"} {
+			if got := executor.fileRead(context.Background(), name, 1, 10); got != "error: sensitive file path is blocked" {
+				t.Fatalf("%s file_read %s: %s", request.Mode, name, got)
+			}
+		}
+		if got := executor.codeSearch(context.Background(), "SECRET_SEARCH_MARKER", nil, true, false); got != "No matches found" {
+			t.Fatalf("%s code_search exposed secret: %s", request.Mode, got)
+		}
+		if got := executor.codeSearch(context.Background(), "SECRET_SEARCH_MARKER", []string{"*.key", "*.pem", ".env"}, true, false); got != "No matches found" {
+			t.Fatalf("%s targeted code_search exposed secret: %s", request.Mode, got)
+		}
+		if got := executor.fileFind(context.Background(), "private", false); strings.Contains(got, "private.key") {
+			t.Fatalf("%s file_find exposed secret path: %s", request.Mode, got)
+		}
+		if got := executor.codeSearch(context.Background(), "publicMarker", nil, true, false); !strings.Contains(got, "main.go") {
+			t.Fatalf("%s code_search lost ordinary code: %s", request.Mode, got)
+		}
+	}
+	secret := gitdiff.FileDiff{Path: "private.key", Hunks: []gitdiff.Hunk{{Lines: []gitdiff.Line{{Kind: '+', Text: "SECRET_SEARCH_MARKER"}}}}}
+	executor := newToolExecutor(root, gitdiff.Request{Mode: gitdiff.ModeWorkspace}).withChangedDiffs("main.go", []gitdiff.FileDiff{{Path: "main.go"}, secret})
+	if got := executor.changedDiffRead([]string{"private.key"}); !strings.Contains(got, "sensitive file path is blocked") || strings.Contains(got, "SECRET_SEARCH_MARKER") {
+		t.Fatalf("changed_diff_read exposed secret: %s", got)
+	}
+}
+
+func TestContextToolsBlockSensitiveRenameTargets(t *testing.T) {
+	root := t.TempDir()
+	gitIn(t, root, "init")
+	gitIn(t, root, "config", "user.email", "test@example.com")
+	gitIn(t, root, "config", "user.name", "Test")
+	gitIn(t, root, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("SECRET_RENAME_MARKER\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", ".env")
+	gitIn(t, root, "commit", "-m", "base")
+	base := strings.TrimSpace(gitOutputIn(t, root, "rev-parse", "HEAD"))
+	if err := os.Rename(filepath.Join(root, ".env"), filepath.Join(root, "public.go")); err != nil {
+		t.Fatal(err)
+	}
+	check := func(request gitdiff.Request) {
+		t.Helper()
+		executor := newToolExecutor(root, request)
+		if got := executor.fileRead(context.Background(), "public.go", 1, 10); got != "error: sensitive rename target is blocked" {
+			t.Fatalf("%s file_read exposed rename target: %s", request.Mode, got)
+		}
+		if got := executor.codeSearch(context.Background(), "SECRET_RENAME_MARKER", nil, true, false); got != "No matches found" {
+			t.Fatalf("%s code_search exposed rename target: %s", request.Mode, got)
+		}
+		if got := executor.fileFind(context.Background(), "public", false); strings.Contains(got, "public.go") {
+			t.Fatalf("%s file_find exposed rename target: %s", request.Mode, got)
+		}
+	}
+	check(gitdiff.Request{Mode: gitdiff.ModeWorkspace})
+	gitIn(t, root, "add", "-A")
+	check(gitdiff.Request{Mode: gitdiff.ModeWorkspace})
+	if err := os.Symlink("public.go", filepath.Join(root, "alias.go")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	gitIn(t, root, "add", "alias.go")
+	if got := newToolExecutor(root, gitdiff.Request{Mode: gitdiff.ModeWorkspace}).fileRead(context.Background(), "alias.go", 1, 10); got != "error: sensitive rename target is blocked" {
+		t.Fatalf("symlink exposed renamed secret: %s", got)
+	}
+	gitIn(t, root, "commit", "-m", "rename")
+	head := strings.TrimSpace(gitOutputIn(t, root, "rev-parse", "HEAD"))
+	check(gitdiff.Request{Mode: gitdiff.ModeCommit, Commit: head})
+	check(gitdiff.Request{Mode: gitdiff.ModeRange, From: base, To: head})
+}
+
 func TestCodeSearchSupportsFixedStringAlternativesAndLiteralPipes(t *testing.T) {
 	root := t.TempDir()
 	content := "package p\nfunc PublishAIReviewReport() {}\nfunc UpsertAIReviewComment() {}\nconst expression = left | right\nfunc formatAIReviewComment() {}\nconst configName = \"config.json\"\n"
@@ -95,6 +193,20 @@ func TestFileReadRejectsSymlinkEscape(t *testing.T) {
 	got := newToolExecutor(root, gitdiff.Request{Mode: gitdiff.ModeWorkspace}).fileRead(context.Background(), "link.txt", 1, 10)
 	if !strings.Contains(got, "path escapes repository") {
 		t.Fatalf("symlink escape was not rejected: %s", got)
+	}
+}
+
+func TestFileReadRejectsSymlinkToSensitivePath(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "private.key"), []byte("SECRET_MARKER"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("private.key", filepath.Join(root, "ordinary.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	got := newToolExecutor(root, gitdiff.Request{Mode: gitdiff.ModeWorkspace}).fileRead(context.Background(), "ordinary.txt", 1, 10)
+	if got != "error: sensitive file path is blocked" {
+		t.Fatalf("symlink exposed sensitive target: %s", got)
 	}
 }
 

@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/koderover/zadig-review-agent/internal/agent"
 	"github.com/koderover/zadig-review-agent/internal/filter"
 	"github.com/koderover/zadig-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/sensitive"
 )
 
 type toolAction struct {
@@ -37,11 +39,19 @@ type toolAction struct {
 type toolExecutor struct {
 	root                 string
 	ref                  string
+	request              gitdiff.Request
+	policy               *contextPathPolicy
 	currentFile          string
 	changedDiffs         map[string]gitdiff.FileDiff
 	changedDiffsRead     map[string]bool
 	changedDiffBytes     int
 	changedDiffTruncated bool
+}
+
+type contextPathPolicy struct {
+	once    sync.Once
+	blocked map[string]bool
+	err     error
 }
 
 const maxToolOutputBytes = 32 * 1024
@@ -64,7 +74,33 @@ func newToolExecutor(root string, request gitdiff.Request) toolExecutor {
 	case gitdiff.ModeRange:
 		ref = request.To
 	}
-	return toolExecutor{root: root, ref: ref}
+	executor := toolExecutor{root: root, ref: ref, request: request}
+	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
+		executor.policy = &contextPathPolicy{}
+	}
+	return executor
+}
+
+func (e toolExecutor) blockedContextPaths(ctx context.Context) (map[string]bool, error) {
+	if e.policy == nil {
+		return nil, nil
+	}
+	e.policy.once.Do(func() {
+		e.policy.blocked, e.policy.err = (gitdiff.Client{Dir: e.root}).BlockedContextPaths(ctx, e.request)
+	})
+	return e.policy.blocked, e.policy.err
+}
+
+func isBlockedContextPath(blocked map[string]bool, path string) bool {
+	if blocked[path] {
+		return true
+	}
+	for blockedPath := range blocked {
+		if strings.EqualFold(blockedPath, path) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e toolExecutor) withChangedDiffs(currentFile string, files []gitdiff.FileDiff) toolExecutor {
@@ -72,6 +108,9 @@ func (e toolExecutor) withChangedDiffs(currentFile string, files []gitdiff.FileD
 	e.changedDiffs = make(map[string]gitdiff.FileDiff, len(files))
 	e.changedDiffsRead = make(map[string]bool, len(files))
 	for _, file := range files {
+		if sensitive.IsPath(file.Path) || sensitive.IsPath(file.OldPath) {
+			continue
+		}
 		e.changedDiffs[file.Path] = file
 	}
 	return e
@@ -184,6 +223,10 @@ func (e *toolExecutor) changedDiffRead(paths []string) string {
 		clean, ok := filter.CleanRelative(path)
 		if !ok {
 			rejected = append(rejected, fmt.Sprintf("%q: invalid repository-relative path", path))
+			continue
+		}
+		if sensitive.IsPath(clean) {
+			rejected = append(rejected, fmt.Sprintf("%q: sensitive file path is blocked", clean))
 			continue
 		}
 		if clean == e.currentFile {
@@ -330,15 +373,36 @@ func (e toolExecutor) fileRead(ctx context.Context, path string, start, end int)
 	if !ok {
 		return "error: invalid repository path"
 	}
+	if sensitive.IsPath(clean) {
+		return "error: sensitive file path is blocked"
+	}
+	blocked, err := e.blockedContextPaths(ctx)
+	if err != nil {
+		return "error: inspect sensitive paths: " + err.Error()
+	}
+	if isBlockedContextPath(blocked, clean) {
+		return "error: sensitive rename target is blocked"
+	}
 	var data []byte
-	var err error
 	if e.ref != "" {
 		data, err = e.runGit(ctx, "show", e.ref+":"+clean)
 	} else {
 		var full string
 		full, clean, err = e.safePath(clean)
 		if err == nil {
-			data, err = os.ReadFile(full)
+			root, rootErr := filepath.Abs(e.root)
+			if rootErr == nil {
+				root, rootErr = filepath.EvalSymlinks(root)
+			}
+			if rootErr != nil {
+				err = rootErr
+			} else if resolved, relErr := filepath.Rel(root, full); relErr != nil {
+				err = relErr
+			} else if isBlockedContextPath(blocked, filepath.ToSlash(resolved)) {
+				return "error: sensitive rename target is blocked"
+			} else {
+				data, err = os.ReadFile(full)
+			}
 		}
 	}
 	if err != nil {
@@ -381,6 +445,10 @@ func (e toolExecutor) codeSearch(ctx context.Context, searchText string, pattern
 	if searchText == "" {
 		return "error: search_text is blank"
 	}
+	blocked, err := e.blockedContextPaths(ctx)
+	if err != nil {
+		return "error: inspect sensitive paths: " + err.Error()
+	}
 	args := []string{"grep", "-n", "-I", "--max-count=100"}
 	if !caseSensitive {
 		args = append(args, "-i")
@@ -402,7 +470,14 @@ func (e toolExecutor) codeSearch(ctx context.Context, searchText string, pattern
 		args = append(args, e.ref)
 	}
 	args = append(args, "--")
+	if len(patterns) == 0 {
+		args = append(args, ".")
+	}
 	args = append(args, patterns...)
+	args = append(args, sensitive.GitExcludePathspecs()...)
+	for path := range blocked {
+		args = append(args, ":(exclude,literal)"+path)
+	}
 	data, err := e.runGit(ctx, args...)
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -495,11 +570,15 @@ func (e toolExecutor) fileFind(ctx context.Context, queryName string, caseSensit
 	if queryName == "" {
 		return "// The file was not found"
 	}
+	blocked, err := e.blockedContextPaths(ctx)
+	if err != nil {
+		return "error: inspect sensitive paths: " + err.Error()
+	}
 	var args []string
 	if e.ref != "" {
-		args = []string{"ls-tree", "-r", "--name-only", e.ref}
+		args = []string{"ls-tree", "-r", "-z", "--name-only", e.ref}
 	} else {
-		args = []string{"ls-files", "--cached", "--others", "--exclude-standard"}
+		args = []string{"ls-files", "-z", "--cached", "--others", "--exclude-standard"}
 	}
 	data, err := e.runGit(ctx, args...)
 	if err != nil {
@@ -510,9 +589,9 @@ func (e toolExecutor) fileFind(ctx context.Context, queryName string, caseSensit
 		wanted = strings.ToLower(wanted)
 	}
 	var matches []string
-	for _, path := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+	for _, path := range strings.Split(string(data), "\x00") {
 		clean, ok := filter.CleanRelative(path)
-		if !ok || !fileFindCandidate(clean) {
+		if !ok || sensitive.IsPath(clean) || blocked[clean] || !fileFindCandidate(clean) {
 			continue
 		}
 		name := filepath.Base(clean)
@@ -578,6 +657,9 @@ func (e toolExecutor) safePath(path string) (string, string, error) {
 	rel, err := filepath.Rel(root, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", fmt.Errorf("path escapes repository")
+	}
+	if sensitive.IsPath(rel) {
+		return "", "", fmt.Errorf("sensitive file path is blocked")
 	}
 	return resolved, clean, nil
 }

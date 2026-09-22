@@ -64,3 +64,29 @@ func TestApplyKeepsExtendedReviewFileTypes(t *testing.T) {
 		t.Fatalf("expected extended source types to be kept: %+v", result)
 	}
 }
+
+func TestApplySensitivePathCannotBeIncluded(t *testing.T) {
+	files := []gitdiff.FileDiff{
+		{Path: "config/.env.production"},
+		{Path: "certs/server.pem"},
+		{Path: "src/main.go", OldPath: "secrets/id_rsa"},
+		{Path: "src/safe.go"},
+	}
+	result := Apply(files, Options{RuleFile: rules.RuleFile{Include: []string{"**"}}})
+	if len(result.Kept) != 1 || result.Kept[0].Path != "src/safe.go" || len(result.Excluded) != 3 {
+		t.Fatalf("sensitive paths bypassed the filter: %+v", result)
+	}
+	for _, excluded := range result.Excluded {
+		if excluded.Reason != ReasonSensitivePath {
+			t.Fatalf("wrong exclusion reason: %+v", excluded)
+		}
+	}
+}
+
+func TestExcludeBlockedPathsRemovesDiffContent(t *testing.T) {
+	result := Apply([]gitdiff.FileDiff{{Path: "public.go"}, {Path: "safe.go"}}, Options{})
+	result = ExcludeBlockedPaths(result, map[string]bool{"PUBLIC.go": true})
+	if len(result.Kept) != 1 || result.Kept[0].Path != "safe.go" || len(result.Excluded) != 1 || result.Excluded[0].Path != "PUBLIC.go" || result.Excluded[0].Reason != ReasonSensitiveRenamePrecaution {
+		t.Fatalf("blocked target remained reviewable: %+v", result)
+	}
+}

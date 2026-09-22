@@ -158,6 +158,8 @@ The default quality gate fails on `critical` and `high` findings. Configure it w
 
 ## Privacy and security
 
+- Ordinary untracked files are still reviewed. Paths such as `.env`, private keys and key stores, SSH private keys, `.npmrc`, `.netrc`, `.aws/`, `.kube/`, Docker credentials, Google Cloud credentials, Terraform state/plan files, and `.zadig-review-agent/` configuration are always skipped. A rule's `include` cannot override this protection.
+- Only when a tracked sensitive file is deleted relative to `HEAD` does workspace review also skip **all** untracked files; additions in the same change are skipped as well. Read-only tools also block possible rename targets. The report marks these paths as `sensitive_rename_precaution` and exits incomplete because unrelated new files may be omitted. Path rules cannot identify secrets stored under ordinary file names; exclude those files separately.
 - Diffs, rule text, and repository content requested through read-only tools are sent to the model endpoint you configure. Review the provider's data policy before using sensitive code.
 - JSON reports retain detailed tool output and raw model responses for diagnostics and can contain source code. Reports and configuration files are created with restricted permissions, but you must protect, retain, and delete them according to your own policy.
 - The agent does not provide the model with shell, network, or write-file tools and does not execute repository-provided commands or configuration.

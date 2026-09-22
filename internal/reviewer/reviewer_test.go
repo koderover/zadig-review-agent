@@ -26,6 +26,29 @@ func TestSystemPromptUsesConfiguredLanguage(t *testing.T) {
 	}
 }
 
+func TestRunnerReportsSensitiveRenamePrecautionAsIncomplete(t *testing.T) {
+	root := t.TempDir()
+	gitIn(t, root, "init")
+	gitIn(t, root, "config", "user.email", "test@example.com")
+	gitIn(t, root, "config", "user.name", "Test")
+	gitIn(t, root, "config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("SECRET_MARKER\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "add", ".env")
+	gitIn(t, root, "commit", "-m", "base")
+	if err := os.Rename(filepath.Join(root, ".env"), filepath.Join(root, "public.go")); err != nil {
+		t.Fatal(err)
+	}
+	report, err := (Runner{
+		Root: root, Config: config.Default(), Git: gitdiff.Client{Dir: root},
+		DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace},
+	}).Run(context.Background())
+	if err != nil || !report.Incomplete || report.ExitCode != agent.ExitIncomplete || len(report.ExcludedFiles) != 1 || report.ExcludedFiles[0].Path != "public.go" || report.ExcludedFiles[0].Reason != "sensitive_rename_precaution" || len(report.Warnings) != 1 {
+		t.Fatalf("precaution was silent or marked complete: report=%+v err=%v", report, err)
+	}
+}
+
 func TestRunnerFiltersInvalidFindingsAndBlocks(t *testing.T) {
 	file := gitdiff.FileDiff{Path: "main.go", Hunks: []gitdiff.Hunk{{
 		NewStart:     10,

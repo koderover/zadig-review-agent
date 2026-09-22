@@ -243,6 +243,50 @@ func TestRuleReferenceRejectsSymlinkToUnsupportedExtension(t *testing.T) {
 	}
 }
 
+func TestRuleReferenceRejectsSensitivePathAndSymlink(t *testing.T) {
+	dir := t.TempDir()
+	secretDir := filepath.Join(dir, ".env")
+	if err := os.Mkdir(secretDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(secretDir, "private.md")
+	if err := os.WriteFile(secret, []byte("SECRET_MARKER"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRuleReference(".env/private.md", dir); err == nil || !strings.Contains(err.Error(), "sensitive rule reference is blocked") {
+		t.Fatalf("sensitive rule reference was accepted: %v", err)
+	}
+	link := filepath.Join(dir, "rule.md")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := readRuleReference("rule.md", dir); err == nil || !strings.Contains(err.Error(), "sensitive rule reference is blocked") {
+		t.Fatalf("sensitive symlink target was accepted: %v", err)
+	}
+}
+
+func TestCustomRuleFileRejectsSensitivePath(t *testing.T) {
+	dir := t.TempDir()
+	secretDir := filepath.Join(dir, ".env")
+	if err := os.Mkdir(secretDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(secretDir, "rules.json")
+	if err := os.WriteFile(path, []byte(`{"rules":[{"path":"**","rule":"SECRET_MARKER"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewResolver(dir, path); err == nil || !strings.Contains(err.Error(), "sensitive rule file path is blocked") {
+		t.Fatalf("sensitive custom rule file was accepted: %v", err)
+	}
+	link := filepath.Join(dir, "rules.json")
+	if err := os.Symlink(path, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := NewResolver(dir, link); err == nil || !strings.Contains(err.Error(), "sensitive rule file path is blocked") {
+		t.Fatalf("sensitive custom rule symlink was accepted: %v", err)
+	}
+}
+
 func TestRuleReferenceRejectsOversizedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "large.md")

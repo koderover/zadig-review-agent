@@ -3,25 +3,67 @@ package filter
 import (
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/koderover/zadig-review-agent/internal/agent"
 	"github.com/koderover/zadig-review-agent/internal/gitdiff"
 	"github.com/koderover/zadig-review-agent/internal/rules"
+	"github.com/koderover/zadig-review-agent/internal/sensitive"
 )
 
 const (
-	ReasonBinary         = "binary"
-	ReasonDeleted        = "deleted"
-	ReasonUserExclude    = "user_exclude"
-	ReasonUnsupportedExt = "unsupported_ext"
-	ReasonDefaultPath    = "default_path"
-	ReasonInvalidPath    = "invalid_path"
+	ReasonBinary                    = "binary"
+	ReasonDeleted                   = "deleted"
+	ReasonUserExclude               = "user_exclude"
+	ReasonUnsupportedExt            = "unsupported_ext"
+	ReasonDefaultPath               = "default_path"
+	ReasonInvalidPath               = "invalid_path"
+	ReasonSensitivePath             = "sensitive_path"
+	ReasonSensitiveRenamePrecaution = "sensitive_rename_precaution"
 )
 
 type Result struct {
 	Kept     []gitdiff.FileDiff
 	Excluded []agent.ExcludedFile
+}
+
+// ExcludeBlockedPaths is the final guard for possible rename targets. The Git
+// client should omit their contents before parsing, but callers may supply a
+// different diff implementation.
+func ExcludeBlockedPaths(result Result, blocked map[string]bool) Result {
+	if len(blocked) == 0 {
+		return result
+	}
+	kept := result.Kept[:0]
+	for _, file := range result.Kept {
+		blockedFile := false
+		for path := range blocked {
+			if strings.EqualFold(file.Path, path) {
+				blockedFile = true
+				break
+			}
+		}
+		if !blockedFile {
+			kept = append(kept, file)
+		}
+	}
+	result.Kept = kept
+	existing := make(map[string]bool, len(result.Excluded))
+	for _, file := range result.Excluded {
+		existing[strings.ToLower(file.Path)] = true
+	}
+	paths := make([]string, 0, len(blocked))
+	for path := range blocked {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
+		if !existing[strings.ToLower(path)] {
+			result.Excluded = append(result.Excluded, agent.ExcludedFile{Path: path, Reason: ReasonSensitiveRenamePrecaution})
+		}
+	}
+	return result
 }
 
 type Options struct {
@@ -37,6 +79,10 @@ func Apply(files []gitdiff.FileDiff, opts Options) Result {
 			continue
 		}
 		f.Path = clean
+		if sensitive.IsPath(clean) || sensitive.IsPath(f.OldPath) {
+			result.Excluded = append(result.Excluded, agent.ExcludedFile{Path: clean, Reason: ReasonSensitivePath})
+			continue
+		}
 		if f.IsBinary {
 			result.Excluded = append(result.Excluded, agent.ExcludedFile{Path: clean, Reason: ReasonBinary})
 			continue

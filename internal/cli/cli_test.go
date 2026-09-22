@@ -12,6 +12,8 @@ import (
 
 	"github.com/koderover/zadig-review-agent/internal/agent"
 	"github.com/koderover/zadig-review-agent/internal/config"
+	"github.com/koderover/zadig-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/rules"
 	"github.com/koderover/zadig-review-agent/internal/version"
 )
 
@@ -172,6 +174,33 @@ func TestReviewPreviewDoesNotNeedModel(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"llm_requests": 0`) || !strings.Contains(string(data), `"total_tokens": 0`) {
 		t.Fatalf("expected preview report to contain zero usage:\n%s", data)
+	}
+}
+
+func TestPreviewReportsSensitiveRenamePrecaution(t *testing.T) {
+	root := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, output)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	runGit("config", "commit.gpgsign", "false")
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("SECRET_MARKER\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", ".env")
+	runGit("commit", "-m", "base")
+	if err := os.Rename(filepath.Join(root, ".env"), filepath.Join(root, "public.go")); err != nil {
+		t.Fatal(err)
+	}
+	report, err := previewReport(context.Background(), config.Default(), rules.Resolver{}, gitdiff.Request{Mode: gitdiff.ModeWorkspace}, root)
+	if err != nil || !report.Incomplete || report.ExitCode != agent.ExitIncomplete || len(report.ExcludedFiles) != 1 || report.ExcludedFiles[0].Path != "public.go" {
+		t.Fatalf("preview hid skipped rename target: report=%+v err=%v", report, err)
 	}
 }
 

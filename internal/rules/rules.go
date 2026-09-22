@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/koderover/zadig-review-agent/internal/sensitive"
 )
 
 //go:embed system_rules.json rule_docs/*
@@ -159,6 +160,13 @@ func loadOptionalLayer(source, path, ruleBase string) (Layer, bool, []string, er
 }
 
 func loadLayer(source, path, ruleBase string) (Layer, []string, error) {
+	if sensitive.IsPath(path) {
+		return Layer{}, nil, fmt.Errorf("sensitive rule file path is blocked")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err == nil && sensitive.IsPath(resolved) {
+		return Layer{}, nil, fmt.Errorf("sensitive rule file path is blocked")
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return Layer{}, nil, err
@@ -298,6 +306,9 @@ func resolveRuleEntries(entries []RuleEntry, baseDir, sourcePath string) []strin
 }
 
 func readRuleReference(reference, baseDir string) (string, error) {
+	if sensitive.IsPath(reference) {
+		return "", fmt.Errorf("sensitive rule reference is blocked")
+	}
 	path := reference
 	if !filepath.IsAbs(path) {
 		if strings.TrimSpace(baseDir) == "" {
@@ -320,6 +331,9 @@ func readRuleFileSafe(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return "", err
+	}
+	if sensitive.IsPath(resolved) {
+		return "", fmt.Errorf("sensitive rule reference is blocked")
 	}
 	if !allowedRuleExtensions[strings.ToLower(filepath.Ext(resolved))] {
 		return "", fmt.Errorf("unsupported resolved extension %q", filepath.Ext(resolved))

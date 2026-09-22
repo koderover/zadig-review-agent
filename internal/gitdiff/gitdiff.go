@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/koderover/zadig-review-agent/internal/sensitive"
 )
 
 type Client struct {
@@ -81,7 +83,12 @@ func (c Client) Diff(ctx context.Context, req Request) ([]FileDiff, error) {
 		if strings.TrimSpace(req.Commit) == "" {
 			return nil, fmt.Errorf("commit mode requires commit")
 		}
-		out, err := c.git(ctx, "-c", "core.quotepath=false", "show", "--no-ext-diff", "--no-textconv", "--format=", "--no-color", unifiedArg(req.ContextLines, req.ContextLinesConfigured), "--find-renames", "--end-of-options", req.Commit, "--")
+		renameExcludes, err := c.sensitiveRenameExcludes(ctx, "show", "--format=", "--name-status", "-z", "--find-renames", "--end-of-options", req.Commit)
+		if err != nil {
+			return nil, fmt.Errorf("inspect commit paths: %w", err)
+		}
+		args := []string{"-c", "core.quotepath=false", "show", "--no-ext-diff", "--no-textconv", "--format=", "--no-color", unifiedArg(req.ContextLines, req.ContextLinesConfigured), "--find-renames", "--end-of-options", req.Commit, "--", "."}
+		out, err := c.git(ctx, append(append(args, sensitive.GitExcludePathspecs()...), renameExcludes...)...)
 		if err != nil {
 			return nil, fmt.Errorf("git show: %w", err)
 		}
@@ -94,7 +101,12 @@ func (c Client) Diff(ctx context.Context, req Request) ([]FileDiff, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve merge base: %w", err)
 		}
-		out, err := c.git(ctx, "-c", "core.quotepath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color", unifiedArg(req.ContextLines, req.ContextLinesConfigured), "--find-renames", "--end-of-options", strings.TrimSpace(mergeBase), req.To, "--")
+		renameExcludes, err := c.sensitiveRenameExcludes(ctx, "diff", "--name-status", "-z", "--find-renames", "--end-of-options", strings.TrimSpace(mergeBase), req.To)
+		if err != nil {
+			return nil, fmt.Errorf("inspect range paths: %w", err)
+		}
+		args := []string{"-c", "core.quotepath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color", unifiedArg(req.ContextLines, req.ContextLinesConfigured), "--find-renames", "--end-of-options", strings.TrimSpace(mergeBase), req.To, "--", "."}
+		out, err := c.git(ctx, append(append(args, sensitive.GitExcludePathspecs()...), renameExcludes...)...)
 		if err != nil {
 			return nil, fmt.Errorf("git diff: %w", err)
 		}
@@ -106,10 +118,21 @@ func (c Client) Diff(ctx context.Context, req Request) ([]FileDiff, error) {
 
 func (c Client) diffWorkspace(ctx context.Context, contextLines int, configured bool) ([]FileDiff, error) {
 	args := []string{"-c", "core.quotepath=false", "diff", "--no-ext-diff", "--no-textconv", "--no-color", unifiedArg(contextLines, configured), "--find-renames"}
-	tracked, err := c.git(ctx, append(args, "--end-of-options", "HEAD", "--")...)
+	nameStatusArgs := []string{"diff", "--name-status", "-z", "--find-renames", "--end-of-options", "HEAD"}
+	renameExcludes, err := c.sensitiveRenameExcludes(ctx, nameStatusArgs...)
+	if err != nil {
+		nameStatusArgs = []string{"diff", "--cached", "--name-status", "-z", "--find-renames"}
+		renameExcludes, err = c.sensitiveRenameExcludes(ctx, nameStatusArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("inspect workspace paths: %w", err)
+		}
+	}
+	pathspecs := append([]string{"."}, sensitive.GitExcludePathspecs()...)
+	pathspecs = append(pathspecs, renameExcludes...)
+	tracked, err := c.git(ctx, append(append(args, "--end-of-options", "HEAD", "--"), pathspecs...)...)
 	if err != nil {
 		// An unborn repository has no HEAD. Its index is still reviewable.
-		tracked, err = c.git(ctx, append(args, "--cached", "--")...)
+		tracked, err = c.git(ctx, append(append(args, "--cached", "--"), pathspecs...)...)
 		if err != nil {
 			return nil, fmt.Errorf("git diff workspace: %w", err)
 		}
@@ -130,6 +153,105 @@ func (c Client) diffWorkspace(ctx context.Context, contextLines int, configured 
 	return files, nil
 }
 
+// Name-status exposes paths without returning file contents. A rename from a
+// protected name to an ordinary name must be excluded before fetching the diff.
+func (c Client) sensitiveRenameExcludes(ctx context.Context, args ...string) ([]string, error) {
+	// Metadata collection must not invoke repository-configured diff drivers.
+	command := append([]string{args[0], "--no-ext-diff", "--no-textconv", "--no-color"}, args[1:]...)
+	out, err := c.git(ctx, command...)
+	if err != nil {
+		return nil, err
+	}
+	fields := strings.Split(out, "\x00")
+	var excludes []string
+	var added []string
+	sensitiveDeleted := false
+	for i := 0; i < len(fields) && fields[i] != ""; {
+		status := fields[i]
+		i++
+		if i >= len(fields) {
+			break
+		}
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			if i+1 >= len(fields) {
+				break
+			}
+			oldPath, newPath := fields[i], fields[i+1]
+			i += 2
+			if sensitive.IsPath(oldPath) || sensitive.IsPath(newPath) {
+				excludes = append(excludes, ":(exclude,literal)"+newPath)
+			}
+		} else {
+			path := fields[i]
+			i++
+			switch status {
+			case "A":
+				added = append(added, path)
+			case "D":
+				sensitiveDeleted = sensitiveDeleted || sensitive.IsPath(path)
+			}
+		}
+	}
+	if sensitiveDeleted {
+		// Git can report a heavily edited rename as a delete and an add.
+		// Exclude additions rather than risk returning the old secret content.
+		for _, path := range added {
+			excludes = append(excludes, ":(exclude,literal)"+path)
+		}
+	}
+	return excludes, nil
+}
+
+// BlockedContextPaths lists ordinary-looking paths withheld from diff output
+// because they may contain content moved from a sensitive path. Tools must
+// apply the same exclusions when reading the reviewed snapshot.
+func (c Client) BlockedContextPaths(ctx context.Context, req Request) (map[string]bool, error) {
+	var excludes []string
+	var err error
+	switch req.Mode {
+	case "", ModeWorkspace:
+		excludes, err = c.sensitiveRenameExcludes(ctx, "diff", "--name-status", "-z", "--find-renames", "--end-of-options", "HEAD")
+		if err != nil {
+			excludes, err = c.sensitiveRenameExcludes(ctx, "diff", "--cached", "--name-status", "-z", "--find-renames")
+		}
+	case ModeCommit:
+		excludes, err = c.sensitiveRenameExcludes(ctx, "show", "--format=", "--name-status", "-z", "--find-renames", "--end-of-options", req.Commit)
+	case ModeRange:
+		var mergeBase string
+		mergeBase, err = c.git(ctx, "merge-base", "--end-of-options", req.From, req.To)
+		if err == nil {
+			excludes, err = c.sensitiveRenameExcludes(ctx, "diff", "--name-status", "-z", "--find-renames", "--end-of-options", strings.TrimSpace(mergeBase), req.To)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported diff mode %q", req.Mode)
+	}
+	if err != nil {
+		return nil, err
+	}
+	blocked := make(map[string]bool, len(excludes))
+	for _, exclude := range excludes {
+		blocked[strings.TrimPrefix(exclude, ":(exclude,literal)")] = true
+	}
+	if req.Mode == "" || req.Mode == ModeWorkspace {
+		deleted, err := c.sensitiveTrackedDeleted(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if deleted {
+			untracked, err := c.git(ctx, "ls-files", "-z", "--others", "--exclude-standard")
+			if err != nil {
+				return nil, err
+			}
+			for _, path := range strings.Split(untracked, "\x00") {
+				if path != "" {
+					blocked[path] = true
+				}
+			}
+		}
+	}
+	return blocked, nil
+}
+
 func unifiedArg(contextLines int, configured bool) string {
 	if !configured {
 		contextLines = 3
@@ -138,6 +260,16 @@ func unifiedArg(contextLines int, configured bool) string {
 }
 
 func (c Client) untrackedDiff(ctx context.Context) (string, error) {
+	// An unstaged rename of a tracked secret appears as a deletion plus an
+	// ordinary untracked file. Without reading its contents we cannot identify
+	// the new name, so conservatively skip untracked files in this situation.
+	sensitiveDeleted, err := c.sensitiveTrackedDeleted(ctx)
+	if err != nil {
+		return "", err
+	}
+	if sensitiveDeleted {
+		return "", nil
+	}
 	out, err := c.git(ctx, "ls-files", "-z", "--others", "--exclude-standard")
 	if err != nil {
 		return "", fmt.Errorf("git ls-files --others: %w", err)
@@ -145,6 +277,9 @@ func (c Client) untrackedDiff(ctx context.Context) (string, error) {
 	var b strings.Builder
 	for _, path := range strings.Split(out, "\x00") {
 		if path == "" {
+			continue
+		}
+		if sensitive.IsPath(path) {
 			continue
 		}
 		full := filepath.Join(c.Dir, filepath.FromSlash(path))
@@ -182,6 +317,23 @@ func (c Client) untrackedDiff(ctx context.Context) (string, error) {
 		}
 	}
 	return b.String(), nil
+}
+
+func (c Client) sensitiveTrackedDeleted(ctx context.Context) (bool, error) {
+	deleted, err := c.git(ctx, "diff", "--no-ext-diff", "--no-textconv", "--no-renames", "--name-only", "-z", "--diff-filter=D", "--end-of-options", "HEAD", "--")
+	if err != nil {
+		// An unborn repository has no HEAD; only indexed deletions can exist.
+		deleted, err = c.git(ctx, "ls-files", "-z", "--deleted")
+		if err != nil {
+			return false, fmt.Errorf("inspect deleted paths: %w", err)
+		}
+	}
+	for _, path := range strings.Split(deleted, "\x00") {
+		if sensitive.IsPath(path) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func quoteDiffPath(prefix, path string) string {

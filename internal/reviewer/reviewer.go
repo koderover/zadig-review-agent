@@ -68,7 +68,17 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 	if err != nil {
 		return incomplete(r, head, err), nil
 	}
+	var blocked map[string]bool
+	if client, ok := r.Git.(interface {
+		BlockedContextPaths(context.Context, gitdiff.Request) (map[string]bool, error)
+	}); ok {
+		blocked, err = client.BlockedContextPaths(ctx, r.DiffRequest)
+		if err != nil {
+			return incomplete(r, head, fmt.Errorf("inspect sensitive paths: %w", err)), nil
+		}
+	}
 	filtered := filter.Apply(files, filter.Options{RuleFile: r.RuleResolver.FilterFile})
+	filtered = filter.ExcludeBlockedPaths(filtered, blocked)
 	chunks := fileChunks(filtered.Kept, r.Config.Review.MaxChunkTokens)
 	r.showFileLabel = len(chunks) > 1
 
@@ -93,11 +103,15 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 		ExcludedFiles: filtered.Excluded,
 		Warnings:      append([]string(nil), r.RuleResolver.Warnings...),
 	}
+	if len(blocked) > 0 {
+		report.Incomplete = true
+		report.Warnings = append(report.Warnings, fmt.Sprintf("sensitive_rename_precaution: skipped %d possible rename target(s)", len(blocked)))
+	}
 	if r.Started != nil {
 		r.Started(report)
 	}
 	if len(chunks) == 0 {
-		report.ExitCode = agent.ExitOK
+		report.ExitCode = DecideExit(report, r.Config.Review.FailOn)
 		r.trace("Review completed (%s)", formatElapsed(now().Sub(started)))
 		return report, nil
 	}

@@ -115,6 +115,133 @@ func TestClientDiffRangeCommitAndWorkspace(t *testing.T) {
 	}
 }
 
+func TestClientDiffNeverLoadsSensitivePaths(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init")
+	gitIn(t, dir, "config", "user.email", "test@example.com")
+	gitIn(t, dir, "config", "user.name", "Test")
+	gitIn(t, dir, "config", "commit.gpgsign", "false")
+	write(t, filepath.Join(dir, "main.go"), "package main\n")
+	for _, name := range []string{".env", "server.pem", "private.key", "identity.p12", "release.keystore", "id_rsa", "nested/.env.local", "nested/.env/private.go", "nested/APP.KEY", ".npmrc", ".aws/credentials", ".kube/config", ".docker/config.json", "application_default_credentials.json", ".zadig-review-agent/config.yaml", "terraform.tfstate"} {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		write(t, path, "SENSITIVE_MARKER\n")
+	}
+	gitIn(t, dir, "add", ".")
+	gitIn(t, dir, "commit", "-m", "base")
+	base := strings.TrimSpace(gitOutIn(t, dir, "rev-parse", "HEAD"))
+	write(t, filepath.Join(dir, "main.go"), "package main\nvar OK = true\n")
+	write(t, filepath.Join(dir, "private.key"), "CHANGED_SENSITIVE_MARKER\n")
+	gitIn(t, dir, "add", ".")
+	gitIn(t, dir, "commit", "-m", "change")
+	head := strings.TrimSpace(gitOutIn(t, dir, "rev-parse", "HEAD"))
+	write(t, filepath.Join(dir, "main.go"), "package main\nvar OK = false\n")
+	write(t, filepath.Join(dir, ".env"), "WORKSPACE_SENSITIVE_MARKER\n")
+	write(t, filepath.Join(dir, "untracked.pem"), "UNTRACKED_SENSITIVE_MARKER\n")
+
+	client := Client{Dir: dir}
+	initialFiles, err := client.Diff(context.Background(), Request{Mode: ModeCommit, Commit: base})
+	if err != nil || len(initialFiles) != 1 || initialFiles[0].Path != "main.go" {
+		t.Fatalf("initial commit exposed sensitive files: files=%+v err=%v", initialFiles, err)
+	}
+	for _, request := range []Request{
+		{Mode: ModeCommit, Commit: head},
+		{Mode: ModeRange, From: base, To: head},
+		{Mode: ModeWorkspace},
+	} {
+		files, err := client.Diff(context.Background(), request)
+		if err != nil {
+			t.Fatalf("diff %s: %v", request.Mode, err)
+		}
+		if len(files) != 1 || files[0].Path != "main.go" {
+			t.Fatalf("diff %s exposed sensitive files: %+v", request.Mode, files)
+		}
+	}
+}
+
+func TestClientDiffExcludesRenamedSensitiveFile(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init")
+	gitIn(t, dir, "config", "user.email", "test@example.com")
+	gitIn(t, dir, "config", "user.name", "Test")
+	gitIn(t, dir, "config", "commit.gpgsign", "false")
+	write(t, filepath.Join(dir, ".env"), "RENAMED_SENSITIVE_MARKER\n")
+	write(t, filepath.Join(dir, "main.go"), "package main\n")
+	gitIn(t, dir, "add", ".")
+	gitIn(t, dir, "commit", "-m", "base")
+	base := strings.TrimSpace(gitOutIn(t, dir, "rev-parse", "HEAD"))
+	if err := os.Rename(filepath.Join(dir, ".env"), filepath.Join(dir, "public.txt")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "main.go"), "package main\nvar OK = true\n")
+	client := Client{Dir: dir}
+	check := func(request Request) {
+		t.Helper()
+		files, err := client.Diff(context.Background(), request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(files) != 1 || files[0].Path != "main.go" {
+			t.Fatalf("%s exposed renamed secret: %+v", request.Mode, files)
+		}
+	}
+	check(Request{Mode: ModeWorkspace})
+	gitIn(t, dir, "add", "-A")
+	check(Request{Mode: ModeWorkspace})
+	gitIn(t, dir, "commit", "-m", "rename")
+	head := strings.TrimSpace(gitOutIn(t, dir, "rev-parse", "HEAD"))
+	check(Request{Mode: ModeCommit, Commit: head})
+	check(Request{Mode: ModeRange, From: base, To: head})
+}
+
+func TestClientDiffExcludesAdditionsAfterSensitiveDeletion(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init")
+	gitIn(t, dir, "config", "user.email", "test@example.com")
+	gitIn(t, dir, "config", "user.name", "Test")
+	gitIn(t, dir, "config", "commit.gpgsign", "false")
+	write(t, filepath.Join(dir, ".env"), "OLD_SENSITIVE_MARKER\n")
+	gitIn(t, dir, "add", ".env")
+	gitIn(t, dir, "commit", "-m", "base")
+	base := strings.TrimSpace(gitOutIn(t, dir, "rev-parse", "HEAD"))
+	if err := os.Remove(filepath.Join(dir, ".env")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "public.txt"), "NEW_SENSITIVE_MARKER\n")
+	gitIn(t, dir, "add", "-A")
+	gitIn(t, dir, "commit", "-m", "replace")
+	head := strings.TrimSpace(gitOutIn(t, dir, "rev-parse", "HEAD"))
+	client := Client{Dir: dir}
+	for _, request := range []Request{{Mode: ModeCommit, Commit: head}, {Mode: ModeRange, From: base, To: head}} {
+		files, err := client.Diff(context.Background(), request)
+		if err != nil || len(files) != 0 {
+			t.Fatalf("%s exposed possible renamed secret: files=%+v err=%v", request.Mode, files, err)
+		}
+	}
+}
+
+func TestWorkspaceSkipsUntrackedAfterStagedSensitiveDeletion(t *testing.T) {
+	dir := t.TempDir()
+	gitIn(t, dir, "init")
+	gitIn(t, dir, "config", "user.email", "test@example.com")
+	gitIn(t, dir, "config", "user.name", "Test")
+	gitIn(t, dir, "config", "commit.gpgsign", "false")
+	write(t, filepath.Join(dir, ".env"), "SENSITIVE_MARKER\n")
+	gitIn(t, dir, "add", ".env")
+	gitIn(t, dir, "commit", "-m", "base")
+	if err := os.Remove(filepath.Join(dir, ".env")); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, dir, "add", "-u")
+	write(t, filepath.Join(dir, "renamed.txt"), "SENSITIVE_MARKER\n")
+	files, err := (Client{Dir: dir}).Diff(context.Background(), Request{Mode: ModeWorkspace})
+	if err != nil || len(files) != 0 {
+		t.Fatalf("staged deletion exposed untracked rename: files=%+v err=%v", files, err)
+	}
+}
+
 func TestWorkspaceCombinesStagedAndUnstagedForSameFile(t *testing.T) {
 	dir := t.TempDir()
 	gitIn(t, dir, "init")

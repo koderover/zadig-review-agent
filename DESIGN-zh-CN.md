@@ -192,14 +192,15 @@ Glob 匹配大小写不敏感，支持 `**`、`?`、字符类和 `{a,b}` 展开�
 文件按以下顺序处理：
 
 1. 非法或逃逸路径：`invalid_path`；
-2. 二进制：`binary`；
-3. 已删除文件：`deleted`；
-4. 用户 exclude：`user_exclude`；
-5. 用户 include：直接保留；
-6. 不支持的扩展名或 basename：`unsupported_ext`；
-7. 默认测试路径：`default_path`。
+2. 敏感路径：`sensitive_path`；
+3. 二进制：`binary`；
+4. 已删除文件：`deleted`；
+5. 用户 exclude：`user_exclude`；
+6. 用户 include：直接保留；
+7. 不支持的扩展名或 basename：`unsupported_ext`；
+8. 默认测试路径：`default_path`。
 
-`include` 是 bypass，不是白名单：它允许文件绕过扩展名 allowlist 和默认测试路径排除，但不能绕过非法路径、binary、deleted 和 user exclude。
+`include` 是 bypass，不是白名单：它允许文件绕过扩展名 allowlist 和默认测试路径排除，但不能绕过非法路径、敏感路径、binary、deleted 和 user exclude。Git diff 使用路径排除，未跟踪文件在读取前检查路径；通过 Git name-status 元数据也会排除识别出的敏感文件改名。如果敏感文件被删除，还会跳过同一 diff 中的新增文件，防止大幅改写的改名被误判为删除加新增。工作区中，只要已跟踪的敏感文件相对 `HEAD` 被删除，无论是否已暂存，都会跳过全部未跟踪文件；其他情况下仍审查普通未跟踪文件。只读工具也会拦截可能的改名目标；报告以 `sensitive_rename_precaution` 记录这些路径，并标记审查不完整。`file_read`、`code_search`、`file_find`、`changed_diff_read` 和规则文件引用使用相同的路径规则。
 
 内置 basename 支持 `Dockerfile`、`Makefile`、`pom.xml`、`build.gradle`、`package.json` 和 `Cargo.toml`，其余类型按扩展名 allowlist 判断。
 

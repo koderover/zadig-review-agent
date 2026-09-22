@@ -423,7 +423,12 @@ func previewReport(ctx context.Context, cfg config.Config, resolver rules.Resolv
 	if err != nil {
 		return agent.Report{}, err
 	}
+	blocked, err := client.BlockedContextPaths(ctx, diffReq)
+	if err != nil {
+		return agent.Report{}, fmt.Errorf("inspect sensitive paths: %w", err)
+	}
 	filtered := filter.Apply(files, filter.Options{RuleFile: resolver.FilterFile})
+	filtered = filter.ExcludeBlockedPaths(filtered, blocked)
 	report := agent.Report{
 		Metadata: agent.Metadata{
 			DiffMode:   string(diffReq.Mode),
@@ -445,6 +450,11 @@ func previewReport(ctx context.Context, cfg config.Config, resolver rules.Resolv
 		Warnings:      append([]string(nil), resolver.Warnings...),
 		Process:       agent.ReviewProcess{ToolCalls: []agent.ToolCall{}},
 		ExitCode:      agent.ExitOK,
+	}
+	if len(blocked) > 0 {
+		report.Incomplete = true
+		report.ExitCode = agent.ExitIncomplete
+		report.Warnings = append(report.Warnings, fmt.Sprintf("sensitive_rename_precaution: skipped %d possible rename target(s)", len(blocked)))
 	}
 	for _, file := range filtered.Kept {
 		rule := resolver.Resolve(file.Path)
