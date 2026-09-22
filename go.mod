@@ -7,7 +7,7 @@ require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/openai/openai-go/v3 v3.42.0
 	github.com/pkoukk/tiktoken-go v0.1.8
-	google.golang.org/genai v1.63.0
+	google.golang.org/genai v1.71.0
 )
 
 require (
