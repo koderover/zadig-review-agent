@@ -100,7 +100,7 @@ func ConsoleResult(report agent.Report, mode string) string {
 	}
 	if len(report.Warnings) > 0 {
 		fmt.Fprintf(&b, "Warnings: %d\n", len(report.Warnings))
-		if mode == "detailed" {
+		if mode == "detailed" || report.Incomplete {
 			for _, warning := range report.Warnings {
 				fmt.Fprintf(&b, "- %s\n", warning)
 			}

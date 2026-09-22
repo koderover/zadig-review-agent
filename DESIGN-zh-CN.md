@@ -107,7 +107,7 @@ review:
   max_tool_rounds: 30
   max_context_tool_calls: 10
   context_convergence_ratio: 0.5
-  max_chunk_tokens: 12000
+  max_chunk_tokens: 20000
   max_tokens_budget: 0
   confidence_threshold: 0.75
   fail_on:
@@ -119,7 +119,7 @@ model:
   name: configured-model
   endpoint: https://api.openai.com/v1
   api_key: sk-...
-  timeout: 120s
+  timeout: 8m
 
 output:
   json: review-report.json
@@ -141,7 +141,7 @@ output:
 export ZADIG_REVIEW_MODEL_PROTOCOL=openai
 export ZADIG_REVIEW_MODEL_NAME=gpt-4o
 export ZADIG_REVIEW_MODEL_ENDPOINT=https://api.openai.com/v1
-export ZADIG_REVIEW_MODEL_TIMEOUT=120s
+export ZADIG_REVIEW_MODEL_TIMEOUT=8m
 export ZADIG_REVIEW_MODEL_API_KEY=...
 ```
 
@@ -243,7 +243,7 @@ Plan、Main、Relocation 和 Review Filter 分别使用独立 system/user Prompt
 - 工具输出只进入 tool message；
 - 仓库数据始终声明为不可信输入。
 
-单文件 changed lines 达到 50 时执行无工具 Plan；小于 50 行时跳过。大 hunk 根据 `max_chunk_tokens` 分片。每次模型请求前执行约 80% 的本地 token guard；该 guard 是粗略容量保护，正式 Usage 以 Provider 响应为准。
+单文件 changed lines 达到 50 时执行无工具 Plan；小于 50 行时跳过。大 hunk 根据 `max_chunk_tokens` 分片。本地 token 估算采用内嵌的 cl100k_base 分词器（与 OCR 的默认 CountTokens 相同）；对其他模型系列仍是近似值。每次模型请求前执行约 80% 的本地 token guard；正式 Usage 以 Provider 响应为准。
 
 每个文件默认最多执行 10 次 `file_read`、`changed_diff_read`、`code_search` 或 `file_find`，由 `review.max_context_tool_calls` 或 `--max-context-tool-calls` 调整。该值是硬上限：不超过 10 行的变更最多使用 6 次，11 至 50 行最多使用 8 次，更大变更使用配置上限。软收敛阈值为 `ceil(有效硬上限 × review.context_convergence_ratio)`；默认比例为 `0.5`，也可通过 `--context-convergence-ratio` 设置。模型最多再执行一轮批量 Context Tool 调用，随后必须提交 finding 或结束。这会在有效预算使用过半时开始收敛，减少低收益的探索调用，同时仍保留最后一轮取证机会。`changed_diff_read` 即使批量读取多个路径也只计一次 Context Tool Call。Finalization 只向模型暴露 `task_done` 和 `code_comment`。
 
@@ -264,12 +264,12 @@ Plan、Main、Relocation 和 Review Filter 分别使用独立 system/user Prompt
 
 ### 8.1 上下文压缩
 
-Main Loop 在每次自主选择阶段的模型请求前估算当前消息和工具定义的 Token。达到 `max_chunk_tokens` 的 60% 且存在可压缩的历史轮次时，执行一次同步 LLM 摘要请求。收敛请求和 Finalization 请求不再执行这种机会式压缩，因为它们要么已经终止，要么最多只允许最后一轮取证：
+Main Loop 在每次自主选择阶段的模型请求前估算当前消息和工具定义的 Token。达到 `max_chunk_tokens` 的 60% 且存在可压缩的历史轮次时，执行一次同步 LLM 摘要请求。收敛请求和 Finalization 请求通常跳过这种机会式压缩；若下一次请求将超过 80% 硬阈值，则压缩全部已完成轮次，同时保留当前收敛或收尾指令：
 
 - system message 和初始 user message 固定保留；
 - 较旧的完整 assistant/tool 轮次进入摘要；
 - 最近两个完整轮次保持原始消息和 Tool Call ID，不拆散 assistant tool call 与 tool result；
-- 如果少量超大工具结果直接达到 80% 硬阈值，允许摘要全部已完成轮次，避免尚未积累三个轮次就直接失败；
+- 如果请求超过 80% 硬阈值，摘要全部已完成轮次，即使尚未积累三个轮次；
 - 摘要以独立的 `<previous_review_summary>` user message 放回上下文，然后继续原生 Tool Loop。
 
 压缩输入使用结构化 JSON，保留 assistant 工具名称、参数、Tool Call ID 和工具结果。压缩请求不携带工具定义，不允许调用仓库工具。压缩产生的 Prompt、Completion、Cache Token 和 LLM Requests 全部计入本次 review Usage。

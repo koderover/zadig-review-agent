@@ -4,7 +4,7 @@ review:
   max_tool_rounds: 30
   max_context_tool_calls: 10
   context_convergence_ratio: 0.5
-  max_chunk_tokens: 12000
+  max_chunk_tokens: 20000
   max_tokens_budget: 0
   confidence_threshold: 0.75
   fail_on:
@@ -16,7 +16,7 @@ model:
   name: gpt-4o
   endpoint: https://api.openai.com/v1
   api_key: sk-...
-  timeout: 120s
+  timeout: 8m
 
 output:
   # Relative report paths are saved under:

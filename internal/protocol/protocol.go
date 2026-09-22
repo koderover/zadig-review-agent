@@ -128,7 +128,7 @@ func (Registry) Build(cfg config.ModelConfig) (LLM, error) {
 		return nil, fmt.Errorf("model.endpoint is required")
 	}
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 120 * time.Second
+		cfg.Timeout = config.Default().Model.Timeout
 	}
 	switch cfg.Protocol {
 	case "openai":

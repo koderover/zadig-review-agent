@@ -315,7 +315,7 @@ func (r Runner) reviewFile(ctx context.Context, file gitdiff.FileDiff, rule rule
 
 func fileChunks(files []gitdiff.FileDiff, maxTokens int) []gitdiff.FileDiff {
 	if maxTokens < 1000 {
-		maxTokens = 12000
+		maxTokens = config.Default().Review.MaxChunkTokens
 	}
 	target := maxTokens * 7 / 10
 	var chunks []gitdiff.FileDiff
@@ -392,11 +392,6 @@ func countChanges(lines []gitdiff.Line) (int, int) {
 		}
 	}
 	return insertions, deletions
-}
-
-func estimateTokens(text string) int {
-	runes := len([]rune(text))
-	return (runes + 3) / 4
 }
 
 func renderFileDiff(file gitdiff.FileDiff) string {

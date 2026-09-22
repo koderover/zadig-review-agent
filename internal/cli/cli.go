@@ -72,7 +72,7 @@ func runReview(ctx context.Context, args []string, stdout, stderr io.Writer) (in
 	modelProtocol := fs.String("model-protocol", "", "model protocol: openai, gemini, anthropic")
 	modelName := fs.String("model-name", "", "model name")
 	modelEndpoint := fs.String("model-endpoint", "", "model endpoint")
-	modelTimeout := fs.String("model-timeout", "", "model timeout, e.g. 120s")
+	modelTimeout := fs.String("model-timeout", "", "model timeout, e.g. 8m")
 	jsonOut := fs.String("output-json", "", "json report path")
 	mdOut := fs.String("output-md", "", "markdown report path")
 	debug := fs.Bool("debug", false, "record full normalized LLM requests and responses (may contain source code)")

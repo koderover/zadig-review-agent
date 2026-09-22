@@ -46,6 +46,9 @@ func partitionForCompression(messages []protocol.Message, keepRounds int) (compr
 	activeStart := len(messages)
 	if keepRounds > 0 {
 		activeStart = assistantIndexes[len(assistantIndexes)-keepRounds]
+	} else if messages[len(messages)-1].Role == protocol.RoleUser {
+		// Keep a pending convergence or finalization instruction outside the summary.
+		activeStart--
 	}
 	if activeStart <= 2 {
 		return compressionPartition{}, false
@@ -59,13 +62,12 @@ func (r Runner) maybeCompressMessages(ctx context.Context, file string, round in
 	if requestTokens < int(float64(r.Config.Review.MaxChunkTokens)*compressionThreshold) {
 		return messages, ""
 	}
-	partition, ok := partitionForCompression(messages, compressionKeepRounds)
-	if !ok && requestTokens >= r.Config.Review.MaxChunkTokens*4/5 {
-		// A small number of unusually large tool results can cross the hard
-		// threshold before there are two older rounds. Summarize all completed
-		// rounds rather than failing without attempting recovery.
-		partition, ok = partitionForCompression(messages, 0)
+	keepRounds := compressionKeepRounds
+	if requestTokens > r.Config.Review.MaxChunkTokens*4/5 {
+		// A request that would be rejected needs the largest safe reduction.
+		keepRounds = 0
 	}
+	partition, ok := partitionForCompression(messages, keepRounds)
 	if !ok {
 		return messages, ""
 	}

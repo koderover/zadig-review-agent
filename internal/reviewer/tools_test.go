@@ -64,6 +64,25 @@ func TestCodeSearchSupportsFixedStringAlternativesAndLiteralPipes(t *testing.T) 
 	}
 }
 
+func TestCodeSearchRequestsCorrectionForInvalidPerlRegexp(t *testing.T) {
+	root := t.TempDir()
+	content := "package p\nfunc StreamServiceLogs() {}\nfunc CollectServiceLogs() {}\n"
+	if err := os.WriteFile(filepath.Join(root, "main.go"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "init")
+	gitIn(t, root, "add", "main.go")
+	executor := newToolExecutor(root, gitdiff.Request{Mode: gitdiff.ModeWorkspace})
+	got := executor.codeSearch(context.Background(), "StreamServiceLogs(|CollectServiceLogs(", []string{"*.go"}, true, true)
+	if !strings.HasPrefix(got, "error: invalid regular expression:") || !strings.Contains(got, "missing closing parenthesis") || !strings.Contains(got, "Regenerate a valid PCRE pattern") {
+		t.Fatalf("invalid regex did not request a correction:\n%s", got)
+	}
+	corrected := executor.codeSearch(context.Background(), `StreamServiceLogs\(|CollectServiceLogs\(`, []string{"*.go"}, true, true)
+	if !strings.Contains(corrected, "2|func StreamServiceLogs") || !strings.Contains(corrected, "3|func CollectServiceLogs") {
+		t.Fatalf("corrected regex did not find the functions:\n%s", corrected)
+	}
+}
+
 func TestFileReadRejectsSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.txt")

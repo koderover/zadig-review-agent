@@ -69,9 +69,12 @@ func truncateProgressValue(value string) string {
 func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rules.ResolvedRule, allFiles []gitdiff.FileDiff) ([]agent.Finding, agent.TokenUsage, []string, error) {
 	var usage agent.TokenUsage
 	var warnings []string
-	if estimateTokens(renderFileDiff(file)) > r.Config.Review.MaxChunkTokens*4/5 {
-		r.trace("%sskipped: token budget exceeded", r.progressFilePrefix(file.Path))
-		return nil, usage, []string{"token_threshold_exceeded: " + file.Path}, nil
+	diffTokens := estimateTokens(renderFileDiff(file))
+	tokenLimit := r.Config.Review.MaxChunkTokens * 4 / 5
+	if diffTokens > tokenLimit {
+		warning := tokenThresholdWarning(file.Path, diffTokens, tokenLimit)
+		r.trace("%sskipped: %s", r.progressFilePrefix(file.Path), warning)
+		return nil, usage, []string{warning}, nil
 	}
 
 	values := map[string]string{
@@ -180,6 +183,8 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles
 	requireTool := false
 	hadToolActivity := false
 	contextToolCalls := 0
+	invalidRegexRepairUsed := false
+	repairingInvalidRegex := false
 	contextToolCache := make(map[string]cachedContextTool)
 	finalizing := false
 	converging := false
@@ -189,13 +194,15 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles
 	compressionEnabled := true
 	roundLimit := maxToolRounds
 	for round := 0; round < roundLimit; round++ {
-		if contextToolCalls >= maxContextToolCalls && !finalizing {
+		if repairingInvalidRegex {
+			repairingInvalidRegex = false
+		} else if contextToolCalls >= maxContextToolCalls && !finalizing {
 			finalizing = true
 			converging = false
 			requireTool = true
 			messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "The context tool budget is exhausted. Finalize now with one code_comment call containing all confirmed findings, or task_done. Do not request more repository context."})
 			r.trace("%scontext tool budget reached (%d); finalizing review", r.progressFilePrefix(file.Path), maxContextToolCalls)
-		} else if round == maxToolRounds-1 && !finalizing {
+		} else if round >= maxToolRounds-1 && !finalizing {
 			finalizing = true
 			converging = false
 			requireTool = true
@@ -216,7 +223,8 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles
 		}
 		requestWasConverging := converging && !finalizing
 		requestRequiredTool := requireTool
-		if compressionEnabled && !finalizing && !requestWasConverging {
+		requestTokens := estimateRequestTokens(protocol.Request{Messages: messages, Tools: requestTools, RequireTool: requestRequiredTool})
+		if compressionEnabled && ((!finalizing && !requestWasConverging) || requestTokens > r.Config.Review.MaxChunkTokens*4/5) {
 			var compressionWarning string
 			messages, compressionWarning = r.maybeCompressMessages(ctx, file.Path, round+1, messages, requestTools, requestRequiredTool, usage)
 			if compressionWarning != "" {
@@ -230,7 +238,9 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles
 		response, err := r.completeDiagnosed(ctx, "review", file.Path, round+1, request, usage)
 		if err != nil {
 			if errors.Is(err, errTokenThreshold) {
-				warnings = append(warnings, "token_threshold_exceeded: "+file.Path)
+				warning := tokenThresholdWarning(file.Path, estimateRequestTokens(request), r.Config.Review.MaxChunkTokens*4/5)
+				r.trace("%s%s", r.progressFilePrefix(file.Path), warning)
+				warnings = append(warnings, warning)
 				return comments, warnings, nil
 			}
 			if r.process != nil {
@@ -287,6 +297,7 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles
 		done := false
 		commented := false
 		usedContextTool := false
+		invalidRegexThisRound := false
 		for callIndex, toolCall := range toolCalls {
 			action := actions[callIndex]
 			action.Tool = toolCall.Name
@@ -346,6 +357,11 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles
 				} else {
 					contextToolCalls++
 					result = executor.execute(ctx, action)
+					if action.Tool == "code_search" && strings.HasPrefix(result.Output, "error: invalid regular expression:") && !invalidRegexRepairUsed {
+						invalidRegexRepairUsed = true
+						invalidRegexThisRound = true
+						contextToolCalls--
+					}
 				}
 				record := r.process.finish(call, result)
 				if !result.Cached && result.Status == "success" && result.Summary != "context tool budget exhausted" {
@@ -375,6 +391,14 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles
 		if done || finalizing {
 			return comments, warnings, nil
 		}
+		if invalidRegexThisRound {
+			repairingInvalidRegex = true
+			requireTool = true
+			roundLimit++
+			messages = append(messages, protocol.Message{Role: protocol.RoleUser, Content: "The code_search regular expression was invalid. Correct the pattern and call code_search again to check the same hypothesis."})
+			r.trace("%sinvalid code_search regular expression; requesting correction", r.progressFilePrefix(file.Path))
+			continue
+		}
 		if commented && !requestWasConverging {
 			converging = true
 			requireTool = true
@@ -396,6 +420,10 @@ func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles
 	}
 	warnings = append(warnings, "tool_loop_limit_reached: "+file.Path)
 	return comments, warnings, nil
+}
+
+func tokenThresholdWarning(file string, estimated, limit int) string {
+	return fmt.Sprintf("token_threshold_exceeded: %s (estimated=%d limit=%d)", file, estimated, limit)
 }
 
 func contextConvergenceThreshold(hardLimit int, ratio float64) int {

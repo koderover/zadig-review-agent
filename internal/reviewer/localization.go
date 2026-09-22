@@ -47,7 +47,7 @@ func (r Runner) localizeFindings(ctx context.Context, findings []agent.Finding, 
 	}
 	request := protocol.Request{Messages: messages}
 	var localized []localizedFinding
-	var parseErr error
+	var responseErr error
 	var lastResponse protocol.Response
 	for attempt := 1; attempt <= 2; attempt++ {
 		response, err := r.completeAudited(ctx, "localization", findings[0].File, attempt, request, usage)
@@ -55,48 +55,59 @@ func (r Runner) localizeFindings(ctx context.Context, findings []agent.Finding, 
 			return findings, "finding_localization_failed: " + err.Error()
 		}
 		lastResponse = response
-		localized, parseErr = parseLocalizedFindings(response.Text)
-		if parseErr == nil {
+		localized, responseErr = parseLocalizedFindings(response.Text)
+		if responseErr == nil {
+			responseErr = validateLocalizedFindings(findings, localized)
+		}
+		if responseErr == nil {
 			break
 		}
 		if attempt == 1 {
 			if !modelOutputTruncated(response) {
 				request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleAssistant, Content: response.Text})
 			}
-			request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleUser, Content: "Your response was not valid. Return only the complete JSON array with one item for every supplied ID and no wrapper or explanation."})
+			request.Messages = append(request.Messages, protocol.Message{Role: protocol.RoleUser, Content: "Your response was not valid: " + responseErr.Error() + ". Return only the complete JSON array with one item for every supplied ID. Preserve every non-empty field and do not add a wrapper or explanation."})
 			r.trace("%sfinding localization response invalid; retrying", r.progressFilePrefix(findings[0].File))
 		}
 	}
-	if parseErr != nil {
+	if responseErr != nil {
 		if modelOutputTruncated(lastResponse) {
 			return findings, fmt.Sprintf(
 				"finding_localization_failed: model output truncated (agent_source=%q stage=localization file=%q attempt=2 finish_reason=%q completion_tokens=%d visible_chars=%d): %v",
 				agentSourceLocation(0), findings[0].File, lastResponse.FinishReason,
-				lastResponse.Usage.CompletionTokens, len([]rune(lastResponse.Text)), parseErr,
+				lastResponse.Usage.CompletionTokens, len([]rune(lastResponse.Text)), responseErr,
 			)
 		}
-		return findings, "finding_localization_failed: invalid response: " + parseErr.Error()
-	}
-	if len(localized) != len(findings) {
-		return findings, fmt.Sprintf("finding_localization_failed: expected %d items, got %d", len(findings), len(localized))
+		return findings, "finding_localization_failed: invalid response: " + responseErr.Error()
 	}
 	result := append([]agent.Finding(nil), findings...)
-	seen := make(map[string]bool, len(localized))
 	for _, item := range localized {
 		var index int
-		if _, err := fmt.Sscanf(item.ID, "c-%d", &index); err != nil || index < 0 || index >= len(result) || item.ID != fmt.Sprintf("c-%d", index) || seen[item.ID] {
-			return findings, "finding_localization_failed: unknown or duplicate finding ID " + item.ID
-		}
-		if localizedFieldMissing(findings[index], item) {
-			return findings, "finding_localization_failed: localized content is incomplete for " + item.ID
-		}
-		seen[item.ID] = true
+		_, _ = fmt.Sscanf(item.ID, "c-%d", &index)
 		result[index].Title = item.Title
 		result[index].Problem = item.Problem
 		result[index].Evidence = item.Evidence
 		result[index].Suggestion = item.Suggestion
 	}
 	return result, ""
+}
+
+func validateLocalizedFindings(original []agent.Finding, localized []localizedFinding) error {
+	if len(localized) != len(original) {
+		return fmt.Errorf("expected %d items, got %d", len(original), len(localized))
+	}
+	seen := make(map[string]bool, len(localized))
+	for _, item := range localized {
+		var index int
+		if _, err := fmt.Sscanf(item.ID, "c-%d", &index); err != nil || index < 0 || index >= len(original) || item.ID != fmt.Sprintf("c-%d", index) || seen[item.ID] {
+			return fmt.Errorf("unknown or duplicate finding ID %q", item.ID)
+		}
+		if localizedFieldMissing(original[index], item) {
+			return fmt.Errorf("localized content is incomplete for %s", item.ID)
+		}
+		seen[item.ID] = true
+	}
+	return nil
 }
 
 func modelOutputTruncated(response protocol.Response) bool {

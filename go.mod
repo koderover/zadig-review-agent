@@ -6,6 +6,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.57.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/openai/openai-go/v3 v3.42.0
+	github.com/pkoukk/tiktoken-go v0.1.8
 	google.golang.org/genai v1.63.0
 )
 
@@ -15,9 +16,11 @@ require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
+	github.com/dlclark/regexp2 v1.11.0 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/s2a-go v0.1.8 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect

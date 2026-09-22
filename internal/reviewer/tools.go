@@ -409,6 +409,9 @@ func (e toolExecutor) codeSearch(ctx context.Context, searchText string, pattern
 		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
 			return "No matches found"
 		}
+		if usePerlRegexp && strings.Contains(err.Error(), "fatal: -e option,") {
+			return "error: invalid regular expression: " + err.Error() + ". Regenerate a valid PCRE pattern and call code_search again with use_perl_regexp=true."
+		}
 		return "error: " + err.Error()
 	}
 	return formatSearchMatches(string(data), e.ref)

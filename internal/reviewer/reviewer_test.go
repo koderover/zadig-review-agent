@@ -146,7 +146,7 @@ func TestRunnerCountsFailedLLMRequest(t *testing.T) {
 	detail := report.Errors[0]
 	for _, want := range []string{
 		"llm request failed", "stage=review", `file="main.go"`, `agent_source="internal/reviewer/agent_loop.go:`, "round=1", "request_attempts=1",
-		"duration=", "configured_timeout=2m0s", "review_concurrency=4",
+		"duration=", "configured_timeout=8m0s", "review_concurrency=4",
 		"message_count=2", `tools="task_done,code_comment,file_read,code_search,changed_diff_read,file_find"`,
 		"require_tool=false", "estimated_tokens=", "protocol=openai", `model="configured-model"`, "timeout",
 	} {
@@ -611,6 +611,37 @@ func TestRunnerCachesIdenticalContextToolCallsWithoutSpendingBudget(t *testing.T
 	}
 	if len(llm.requests) != 2 || len(llm.requests[1].Tools) != 2 || !llm.requests[1].RequireTool {
 		t.Fatalf("cached call must not delay finalization after the real budget is spent: %+v", llm.requests)
+	}
+}
+
+func TestMainLoopAllowsInvalidRegexCorrectionAtToolLimit(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "dep.go"), []byte("package dep\nfunc StreamServiceLogs() {}\nfunc CollectServiceLogs() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitIn(t, root, "init")
+	gitIn(t, root, "add", "dep.go")
+	file := reviewTestFile()
+	cfg := config.Default()
+	cfg.Review.MaxToolRounds = 2
+	cfg.Review.MaxContextToolCalls = 1
+	llm := &recordingLLM{responses: []protocol.Response{
+		toolResponse("bad", "code_search", `{"search_text":"StreamServiceLogs(|CollectServiceLogs(","use_perl_regexp":true}`),
+		toolResponse("fixed", "code_search", `{"search_text":"StreamServiceLogs\\(|CollectServiceLogs\\(","use_perl_regexp":true}`),
+		doneResponse(),
+	}}
+	r := Runner{Root: root, Config: cfg, DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}, LLM: llm, process: newProcessRecorder(time.Now())}
+	var usage agent.TokenUsage
+	_, warnings, err := r.runMainLoop(context.Background(), file, []gitdiff.FileDiff{file}, mainLoopTestValues(file), 1, &usage)
+	if err != nil || len(warnings) != 0 || len(llm.requests) != 3 {
+		t.Fatalf("regex correction did not finish review: warnings=%v err=%v requests=%d", warnings, err, len(llm.requests))
+	}
+	if !requestContains(llm.requests[1], "Correct the pattern and call code_search again") || len(llm.requests[1].Tools) <= 2 {
+		t.Fatalf("model was not given a correction round: %+v", llm.requests[1])
+	}
+	calls := r.process.snapshot().ToolCalls
+	if len(calls) != 2 || calls[0].Status != "error" || calls[1].Status != "success" || !strings.Contains(calls[1].Output, "StreamServiceLogs") {
+		t.Fatalf("unexpected search calls: %+v", calls)
 	}
 }
 
@@ -1262,7 +1293,7 @@ func TestRunnerSkipsOversizedChunk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Usage.LLMRequests != 0 || len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "token_threshold_exceeded") || report.ExitCode != agent.ExitIncomplete {
+	if report.Usage.LLMRequests != 0 || len(report.Warnings) != 1 || !strings.Contains(report.Warnings[0], "token_threshold_exceeded") || !strings.Contains(report.Warnings[0], "estimated=") || !strings.Contains(report.Warnings[0], "limit=800") || report.ExitCode != agent.ExitIncomplete {
 		t.Fatalf("oversized chunk was not skipped: %+v", report)
 	}
 }

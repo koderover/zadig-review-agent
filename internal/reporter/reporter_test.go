@@ -66,3 +66,15 @@ func TestJSONIncludesEmptyCompressions(t *testing.T) {
 		t.Fatalf("empty compression history must remain observable: %s", data)
 	}
 }
+
+func TestConsoleSummaryShowsIncompleteWarning(t *testing.T) {
+	report := agent.Report{
+		Incomplete: true,
+		ExitCode:   agent.ExitIncomplete,
+		Warnings:   []string{"token_threshold_exceeded: main.go (estimated=10000 limit=9600)"},
+	}
+	result := ConsoleResult(report, "summary")
+	if !strings.Contains(result, "Warnings: 1\n- token_threshold_exceeded: main.go (estimated=10000 limit=9600)") || !strings.Contains(result, "Exit code: 2") {
+		t.Fatalf("incomplete summary must show the cause: %s", result)
+	}
+}

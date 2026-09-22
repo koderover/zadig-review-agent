@@ -37,6 +37,11 @@ func TestPartitionForCompressionPreservesRecentCompleteRounds(t *testing.T) {
 	if !ok || all.compressEnd != 4 || all.activeStart != 4 {
 		t.Fatalf("hard-limit partition must allow all completed rounds to be summarized: %+v ok=%t", all, ok)
 	}
+	withFinalInstruction := append(append([]protocol.Message(nil), messages...), protocol.Message{Role: protocol.RoleUser, Content: "Finalize now"})
+	all, ok = partitionForCompression(withFinalInstruction, 0)
+	if !ok || all.compressEnd != len(messages) || all.activeStart != len(messages) {
+		t.Fatalf("hard-limit compression must preserve the final instruction: %+v ok=%t", all, ok)
+	}
 }
 
 func TestMaybeCompressMessagesRecordsUsageAndStructuredToolHistory(t *testing.T) {
@@ -210,6 +215,50 @@ func TestMainLoopSkipsCompressionWhileConvergingOrFinalizing(t *testing.T) {
 			}
 			if len(llm.requests) != 2 || !requestContains(llm.requests[1], test.wantPrompt) || len(r.process.snapshot().Compressions) != 0 || usage.LLMRequests != 2 {
 				t.Fatalf("%s request must skip last-moment compression: requests=%+v process=%+v usage=%+v", test.name, llm.requests, r.process.snapshot(), usage)
+			}
+		})
+	}
+}
+
+func TestMainLoopCompressesOverLimitConvergenceAndFinalization(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		hardLimit  int
+		ratio      float64
+		wantPrompt string
+	}{
+		{name: "converging", hardLimit: 4, ratio: 0.25, wantPrompt: "Converge now"},
+		{name: "finalizing", hardLimit: 1, ratio: 0.7, wantPrompt: "context tool budget is exhausted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(filepath.Join(root, "dep.go"), []byte(strings.Repeat(strings.Repeat("x", 100)+"\n", 500)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			values := map[string]string{
+				"current_file_path": "main.go", "change_files": "", "system_rule": "review correctness",
+				"diff": "@@ -1 +1 @@\n-old\n+new", "language": "Chinese", "plan_guidance": "none",
+			}
+			cfg := config.Default()
+			cfg.Review.MaxChunkTokens = 6000
+			cfg.Review.MaxContextToolCalls = test.hardLimit
+			cfg.Review.ContextConvergenceRatio = test.ratio
+			llm := &recordingLLM{responses: []protocol.Response{
+				toolResponse("read", "file_read", `{"file_path":"dep.go","start_line":1,"end_line":500}`),
+				{Text: "Reviewed the dependency context; no defect confirmed."},
+				doneResponse(),
+			}}
+			r := Runner{Root: root, Config: cfg, LLM: llm, process: newProcessRecorder(time.Now()), DiffRequest: gitdiff.Request{Mode: gitdiff.ModeWorkspace}}
+			var usage agent.TokenUsage
+			findings, warnings, err := r.runMainLoop(context.Background(), gitdiff.FileDiff{Path: "main.go"}, nil, values, 100, &usage)
+			if err != nil || len(findings) != 0 || len(warnings) != 0 {
+				t.Fatalf("unexpected loop result: findings=%+v warnings=%+v err=%v", findings, warnings, err)
+			}
+			if len(llm.requests) != 3 || !requestContains(llm.requests[2], test.wantPrompt) || !requestContains(llm.requests[2], "<previous_review_summary>") {
+				t.Fatalf("%s must preserve the instruction after compression: request count=%d", test.name, len(llm.requests))
+			}
+			if len(r.process.snapshot().Compressions) != 1 || usage.LLMRequests != 3 {
+				t.Fatalf("%s must compress the oversized request: process=%+v usage=%+v", test.name, r.process.snapshot(), usage)
 			}
 		})
 	}

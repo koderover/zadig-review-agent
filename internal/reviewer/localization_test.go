@@ -92,3 +92,29 @@ func TestLocalizeFindingsAcceptsWrappedArray(t *testing.T) {
 		t.Fatalf("wrapped localization was not accepted: %+v warning=%q", localized, warning)
 	}
 }
+
+func TestLocalizeFindingsRetriesMissingFields(t *testing.T) {
+	llm := &recordingLLM{responses: []protocol.Response{
+		{Text: `[{"id":"c-0","title":"标题","problem":"","evidence":"证据","suggestion":"建议"}]`},
+		{Text: `[{"id":"c-0","title":"标题","problem":"问题","evidence":"证据","suggestion":"建议"}]`},
+	}}
+	r := Runner{Config: config.Default(), LLM: llm}
+	original := []agent.Finding{{File: "main.go", Title: "title", Problem: "problem", Evidence: "evidence", Suggestion: "suggestion"}}
+	localized, warning := r.localizeFindings(context.Background(), original, "Chinese", &agent.TokenUsage{})
+	if warning != "" || localized[0].Problem != "问题" || len(llm.requests) != 2 || !requestContains(llm.requests[1], "localized content is incomplete for c-0") {
+		t.Fatalf("missing field was not retried: localized=%+v warning=%q requests=%+v", localized, warning, llm.requests)
+	}
+}
+
+func TestLocalizeFindingsReportsMissingFieldsAfterRetry(t *testing.T) {
+	llm := &recordingLLM{responses: []protocol.Response{
+		{Text: `[{"id":"c-0","title":"标题","problem":"","evidence":"证据","suggestion":"建议"}]`},
+		{Text: `[{"id":"c-0","title":"标题","problem":"","evidence":"证据","suggestion":"建议"}]`},
+	}}
+	r := Runner{Config: config.Default(), LLM: llm}
+	original := []agent.Finding{{File: "main.go", Title: "title", Problem: "problem", Evidence: "evidence", Suggestion: "suggestion"}}
+	localized, warning := r.localizeFindings(context.Background(), original, "Chinese", &agent.TokenUsage{})
+	if localized[0].Problem != original[0].Problem || !strings.Contains(warning, "localized content is incomplete for c-0") || len(llm.requests) != 2 {
+		t.Fatalf("failed retry should preserve original finding: localized=%+v warning=%q requests=%d", localized, warning, len(llm.requests))
+	}
+}

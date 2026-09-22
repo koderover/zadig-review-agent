@@ -86,7 +86,7 @@ review:
   max_tool_rounds: 30
   max_context_tool_calls: 10
   context_convergence_ratio: 0.5
-  max_chunk_tokens: 12000
+  max_chunk_tokens: 20000
   max_tokens_budget: 0
   confidence_threshold: 0.75
   fail_on: [critical, high]
@@ -96,7 +96,7 @@ model:
   name: configured-model
   endpoint: https://api.openai.com/v1
   api_key: sk-...
-  timeout: 120s
+  timeout: 8m
 
 output:
   json: review-report.json
@@ -181,7 +181,7 @@ SDK retries are disabled. The reviewer performs one consistent retry for timeout
 
 Plan, Main, Relocation, Review Filter, Memory Compression, and Localization use separate embedded system/user prompts. Security boundaries and output constraints occur only in system messages. Diffs, rules, changed-file context, and candidate findings occur only in user messages. Tool output occurs only in tool messages. Repository data is always labeled untrusted.
 
-A file with at least 50 changed lines receives a tool-free plan phase. Large hunks are chunked using `max_chunk_tokens`. A local approximate token guard stops requests near 80% of the configured chunk capacity; provider usage remains authoritative.
+A file with at least 50 changed lines receives a tool-free plan phase. Large hunks are chunked using `max_chunk_tokens`. Local token estimates use the embedded cl100k_base tokenizer (as in OCR's default CountTokens); counts for other model families remain approximate. A local token guard stops requests near 80% of the configured chunk capacity; provider usage remains authoritative.
 
 Each file has at most `review.max_context_tool_calls` context calls, default 10. Changes of at most 10 lines are capped at 6, changes of 11–50 lines at 8, and larger changes at the configured maximum. Convergence begins at `ceil(effective_limit × review.context_convergence_ratio)`; the ratio defaults to `0.5` and can also be set with `--context-convergence-ratio`. The model may then use at most one final batched context round and must submit findings or finish. This soft limit starts convergence halfway through the effective budget, reducing low-value exploratory calls while preserving one final evidence-gathering round. `changed_diff_read` counts as one context call even when it batches several paths. During finalization, only `task_done` and `code_comment` remain available.
 
@@ -200,12 +200,12 @@ Assistant tool calls and all matching results are retained. Output is capped at 
 
 ### Context compression
 
-Before each autonomous main request, the reviewer estimates message and tool-definition tokens. At 60% of `max_chunk_tokens`, completed older rounds may be synchronously summarized. Convergence and Finalization requests skip this opportunistic compression because they are terminal or permit at most one final evidence round:
+Before each autonomous main request, the reviewer estimates message and tool-definition tokens. At 60% of `max_chunk_tokens`, completed older rounds may be synchronously summarized. Convergence and Finalization requests skip this opportunistic compression unless the next request would exceed the 80% guard; in that case all completed rounds are summarized while the pending instruction remains intact:
 
 - system and initial user messages remain fixed;
 - older complete assistant/tool rounds are summarized;
 - the newest two complete rounds remain intact with tool-call IDs;
-- an unusually large early tool result can allow all completed rounds to be summarized before three rounds exist;
+- a request above the 80% guard summarizes all completed rounds, even if fewer than three rounds exist;
 - the result returns as a `<previous_review_summary>` user message.
 
 Compression input is structured JSON. Compression has no tools and cannot access the repository. Its usage is added to total review usage. Failure, empty output, or a non-shrinking summary preserves the original messages and disables further compression for that file, leaving the 80% guard and tool budget as backstops.
