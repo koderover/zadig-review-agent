@@ -3,7 +3,7 @@ module github.com/koderover/zadig-review-agent
 go 1.25.12
 
 require (
-	github.com/anthropics/anthropic-sdk-go v1.57.0
+	github.com/anthropics/anthropic-sdk-go v1.74.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/openai/openai-go/v3 v3.42.0
 	github.com/pkoukk/tiktoken-go v0.1.8
