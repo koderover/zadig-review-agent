@@ -7,9 +7,9 @@ Other changed files:
 Plan guidance:
 {{plan_guidance}}
 
-<system_rule>
+<review_rules>
 {{system_rule}}
-</system_rule>
+</review_rules>
 
 <diff>
 {{diff}}

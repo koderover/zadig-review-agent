@@ -9,9 +9,15 @@
   ],
   "rules": [
     {
+      "name": "Go code review",
       "path": "**/*.go",
       "rule": ".zadig-review/docs/go-review.md",
       "merge_system_rule": true
+    },
+    {
+      "name": "Go formatting",
+      "path": "**/*.go",
+      "rule": "Check that changed Go code follows gofmt formatting."
     }
   ]
 }

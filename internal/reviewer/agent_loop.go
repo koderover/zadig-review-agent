@@ -66,13 +66,14 @@ func truncateProgressValue(value string) string {
 	return string(runes[:limit]) + "..."
 }
 
-func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rules.ResolvedRule, allFiles []gitdiff.FileDiff) ([]agent.Finding, agent.TokenUsage, []string, error) {
+func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, matched []rules.ResolvedRule, allFiles []gitdiff.FileDiff) ([]agent.Finding, agent.TokenUsage, []string, error) {
 	var usage agent.TokenUsage
 	var warnings []string
-	diffTokens := estimateTokens(renderFileDiff(file))
+	ruleText := renderReviewRules(matched)
+	inputTokens := estimateTokens(renderFileDiff(file)) + estimateTokens(ruleText)
 	tokenLimit := r.Config.Review.MaxChunkTokens * 4 / 5
-	if diffTokens > tokenLimit {
-		warning := tokenThresholdWarning(file.Path, diffTokens, tokenLimit)
+	if inputTokens > tokenLimit {
+		warning := tokenThresholdWarning(file.Path, inputTokens, tokenLimit)
 		r.trace("%sskipped: %s", r.progressFilePrefix(file.Path), warning)
 		return nil, usage, []string{warning}, nil
 	}
@@ -80,7 +81,7 @@ func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rule
 	values := map[string]string{
 		"current_file_path": file.Path,
 		"change_files":      changedFilesList(allFiles, file.Path),
-		"system_rule":       rule.Rule,
+		"system_rule":       ruleText,
 		"diff":              renderFileDiff(file),
 		"language":          outputLanguage(r.Config.Output.Language),
 		"plan_guidance":     "No separate plan was required.",
@@ -127,18 +128,26 @@ func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rule
 		return nil, usage, warnings, nil
 	}
 
-	filtered, filterWarning := r.filterFindings(ctx, positioned, values, &usage)
+	validated, err := validateFindings(positioned, file, matched, r.Config.Review.ConfidenceThreshold)
+	if err != nil {
+		return nil, usage, warnings, err
+	}
+	if len(validated) == 0 {
+		return nil, usage, warnings, nil
+	}
+	filtered, filterWarning := r.filterFindings(ctx, validated, values, &usage)
 	if filterWarning != "" {
 		r.trace("%sreview filter failed", r.progressFilePrefix(file.Path))
 		warnings = append(warnings, filterWarning)
 	}
-	removed := len(positioned) - len(filtered)
+	removed := len(validated) - len(filtered)
 	if removed < 0 {
 		removed = 0
 	}
 	if removed > 0 {
 		r.trace("%sreview filter removed %d comment(s)", r.progressFilePrefix(file.Path), removed)
 	}
+	filtered = aggregate(filtered)
 	localized, localizationWarning := r.localizeFindings(ctx, filtered, r.Config.Output.Language, &usage)
 	if localizationWarning != "" {
 		r.trace("%sfinding localization failed", r.progressFilePrefix(file.Path))
@@ -153,8 +162,15 @@ func (r Runner) runSubtask(ctx context.Context, file gitdiff.FileDiff, rule rule
 			final = append(final, finding)
 		}
 	}
-	findings, err := validateFindings(final, file, rule, r.Config.Review.ConfidenceThreshold)
-	return findings, usage, warnings, err
+	return final, usage, warnings, nil
+}
+
+func renderReviewRules(matched []rules.ResolvedRule) string {
+	var b strings.Builder
+	for index, rule := range matched {
+		fmt.Fprintf(&b, "<rule ref=%q name=%q source=%q>\n%s\n</rule>\n", fmt.Sprintf("R%d", index+1), rule.Name, rule.Source, rule.Rule)
+	}
+	return b.String()
 }
 
 func (r Runner) runMainLoop(ctx context.Context, file gitdiff.FileDiff, allFiles []gitdiff.FileDiff, values map[string]string, changedLines int, usage *agent.TokenUsage) ([]agent.Finding, []string, error) {
@@ -485,7 +501,7 @@ func sameReviewPath(left, right string) bool {
 }
 
 func hasFinding(finding agent.Finding) bool {
-	return finding.Severity != "" || finding.Category != "" || finding.RuleID != "" || finding.File != "" || finding.StartLine != 0 || finding.EndLine != 0 || finding.ExistingCode != "" || finding.Title != "" || finding.Problem != "" || finding.Evidence != "" || finding.Suggestion != "" || finding.Confidence != 0
+	return finding.Severity != "" || finding.Category != "" || finding.RuleID != "" || len(finding.RuleIDs) != 0 || finding.File != "" || finding.StartLine != 0 || finding.EndLine != 0 || finding.ExistingCode != "" || finding.Title != "" || finding.Problem != "" || finding.Evidence != "" || finding.Suggestion != "" || finding.Confidence != 0
 }
 
 func contextToolBudget(configured, changedLines int) int {

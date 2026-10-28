@@ -47,6 +47,13 @@ output:
 	}
 }
 
+func TestReviewBudgetDefaults(t *testing.T) {
+	cfg := Default()
+	if cfg.Review.MaxChunkTokens != 30000 || cfg.Model.Timeout != 10*time.Minute {
+		t.Fatalf("unexpected defaults: tokens=%d timeout=%s", cfg.Review.MaxChunkTokens, cfg.Model.Timeout)
+	}
+}
+
 func TestProgressEnabledByDefault(t *testing.T) {
 	if !Default().Output.Progress {
 		t.Fatal("review progress must be enabled by default")

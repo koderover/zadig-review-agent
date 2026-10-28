@@ -6,7 +6,7 @@ English | [简体中文](DESIGN-zh-CN.md)
 
 `zadig-review-agent` is a read-only code-review CLI for local development and Zadig/CI workflows. It reads changes from a local Git repository, uses a large language model to identify concrete defects, and produces console output, JSON and Markdown reports, and deterministic CI exit codes.
 
-Reviews focus on correctness, security, concurrency, resource management, performance, compatibility, and missing critical tests. Formatting, naming preferences, and style observations without a concrete risk are not reported by default.
+Reviews use seven finding categories: style, reliability, maintainability, performance, security, tests, and build. Convention violations require an explicit rule; maintainability and test findings require concrete cost or risk evidence. Preference-only suggestions are not reported.
 
 The current version does not modify the repository, expose arbitrary shell execution, access external MCP servers, load skills, or write comments to GitHub, GitLab, or Gitee.
 
@@ -86,7 +86,7 @@ review:
   max_tool_rounds: 30
   max_context_tool_calls: 10
   context_convergence_ratio: 0.5
-  max_chunk_tokens: 20000
+  max_chunk_tokens: 30000
   max_tokens_budget: 0
   confidence_threshold: 0.75
   fail_on: [critical, high]
@@ -96,7 +96,7 @@ model:
   name: configured-model
   endpoint: https://api.openai.com/v1
   api_key: sk-...
-  timeout: 8m
+  timeout: 10m
 
 output:
   json: review-report.json
@@ -125,7 +125,7 @@ Rules are non-executable declarative data. Layers are loaded in priority order:
 3. `~/.zadig-review/rules.json`
 4. embedded `internal/rules/system_rules.json`
 
-Supplying `--rule` does not disable lower layers. The first matching rule in each layer wins, and resolution continues to the next layer only when the current layer has no match.
+Supplying `--rule` does not disable lower layers. All matching entries in the highest-priority matching user layer apply in declaration order; resolution continues to the next layer only when the current layer has no match. The built-in layer retains its first-match behavior.
 
 ```json
 {
@@ -133,9 +133,15 @@ Supplying `--rule` does not disable lower layers. The first matching rule in eac
   "exclude": ["**/vendor/**", "**/generated/**"],
   "rules": [
     {
+      "name": "Go review",
       "path": "**/*.go",
       "rule": ".zadig-review/docs/go-review.md",
       "merge_system_rule": true
+    },
+    {
+      "name": "Go formatting",
+      "path": "**/*.go",
+      "rule": "Check that changed Go code follows gofmt formatting."
     }
   ]
 }
@@ -143,9 +149,9 @@ Supplying `--rule` does not disable lower layers. The first matching rule in eac
 
 Matching is case-insensitive and supports `**`, `?`, character classes, and `{a,b}` expansion. The final system `**` rule supplies a fallback only when there is no language- or file-specific system rule.
 
-A rule can be inline text or a `.md`, `.txt`, or `.markdown` reference. Custom references resolve relative to the custom rule file, project references relative to the repository root, and global references relative to `~/.zadig-review/`. References are limited to 512 KiB and reject path escape or symlinks resolving to unsupported extensions. A failed reference adds a non-blocking warning and falls back to a lower layer.
+A rule can be inline text or a `.md`, `.txt`, or `.markdown` reference. Custom references resolve relative to the custom rule file, project references relative to the repository root, and global references relative to `~/.zadig-review/`. References are limited to 512 KiB and reject path escape or symlinks resolving to unsupported extensions. A failed reference adds a non-blocking warning and skips that entry; other matching entries in the same layer still apply before falling back to a lower layer.
 
-`merge_system_rule: true` combines the matching user and system rule. Filtering settings come from the highest-priority layer that actually declares include/exclude and are not merged across layers.
+`name` is optional; unnamed rules display their source and entry number. Explicit names must be unique within a rule file, and every built-in rule has a name. `merge_system_rule: true` adds the matching system rule once as a separate named rule. The model may assign one or more temporary R-number references to a finding. Duplicate findings for the same issue merge their rule attributions. Invalid references do not remove the finding. Filtering settings come from the highest-priority layer that actually declares include/exclude and are not merged across layers.
 
 ## 6. File filtering
 
@@ -215,9 +221,9 @@ Commit/range `file_read` uses the reviewed ref; workspace mode uses the working 
 
 ## 9. Finding validation
 
-`code_comment` submits one `finding` or a `findings` batch of up to 10 entries. Each entry contains severity, category, optional rule ID, path, line range, existing code, human-readable explanation, suggestion, and confidence. Severity and category are normalized to lowercase. Categories are restricted to correctness, security, concurrency, performance, compatibility, and tests, with deterministic aliases for a few common model values. Unknown categories are rejected.
+`code_comment` submits one `finding` or a `findings` batch of up to 10 entries. Each entry contains severity, category, optional temporary R-number rule reference (`rule_id`) or references (`rule_ids`), path, line range, existing code, human-readable explanation, suggestion, and confidence. Valid references become the report's `matched_rules` list; compatibility fields `rule_id` and `rule_name` point to its first entry. Missing or invalid references do not remove the finding. Severity and category are normalized to lowercase. Categories are restricted to style, reliability, maintainability, performance, security, tests, and build. Each finding chooses one primary category based on the defect and its direct impact; filenames and rule names do not determine it. Style requires an objectively checkable convention explicitly stated by a built-in or custom rule; maintainability requires concrete cost or risk evidence. Legacy correctness, concurrency, compatibility, error-handling, and resource-management categories normalize to reliability. Test and formatting aliases remain supported. Unknown categories are rejected. The program overwrites any model-supplied category_name with the shared Chinese label before fingerprinting. Console displays Chinese category labels and English severities (critical/high/medium/low), including severity statistics. Markdown displays Chinese category and severity labels (严重、高、中、低), regardless of prose language; JSON IDs and quality gates remain English. Historical reports are not rewritten, and fingerprints can change when categories normalize differently.
 
-After Review Filter, non-English output is localized in one tool-free batch unless every human-readable field already uses the requested Chinese script. Localization can only rewrite title, problem, evidence, and suggestion by candidate ID. It cannot change paths, lines, severity, category, confidence, or finding count. Review Filter and Localization accept bare arrays and a small set of common wrappers, retry malformed responses once with strict formatting, and retain original findings while marking the review incomplete if retries fail. A response ending with `finish_reason=length` is reported explicitly as truncated and is not replayed into the retry context.
+After positioning, findings are validated and fingerprinted before Review Filter. The filter sees each candidate's evidence separately, including candidates with the same fingerprint, and may delete only candidates disproved by the diff. Surviving candidates are then deduplicated, retaining rule attributions only from surviving candidates with that fingerprint. Non-English output is localized in one tool-free batch unless every human-readable field already uses the requested Chinese script. Localization can only rewrite title, problem, evidence, and suggestion by candidate ID; the fingerprint remains based on the original wording. It cannot change paths, lines, severity, category, confidence, or finding count. Review Filter and Localization accept bare arrays and a small set of common wrappers, retry malformed responses once with strict formatting, and retain original findings while marking the review incomplete if retries fail. A response ending with `finish_reason=length` is reported explicitly as truncated and is not replayed into the retry context.
 
 Validation order is:
 
@@ -225,11 +231,12 @@ Validation order is:
 2. if non-empty `existing_code` does not match the current diff, never trust a coincidentally overlapping supplied line range; when the snippet appears in another changed file, drop the candidate without Relocation;
 3. only when `existing_code` is empty, accept a supplied line range overlapping a changed line;
 4. otherwise ask Relocation for exact existing code; malformed JSON receives one strict repair request, while a valid but unresolvable snippet drops only that candidate;
-5. assign stable temporary IDs such as `c-0`;
-6. let Review Filter return IDs to delete only;
-7. allow deletion only when the diff directly disproves a candidate;
-8. retain candidates and mark incomplete if filtering fails;
-9. revalidate lines, severity, confidence, and path, then fingerprint, deduplicate, and aggregate.
+5. validate lines, severity, confidence, path, and rule references, then fingerprint each candidate;
+6. assign stable temporary IDs such as `c-0` and let Review Filter inspect each candidate's evidence;
+7. let Review Filter return IDs to delete only when the diff directly disproves a candidate; retain candidates and mark incomplete if filtering fails;
+8. combine surviving candidates by fingerprint and retain their rule attributions; choose the highest-severity surviving candidate's evidence, suggestion, and confidence;
+9. localize display text and check the final position again;
+10. aggregate across file chunks using the original fingerprint.
 
 Allowed severities are critical, high, medium, and low. Findings below `confidence_threshold` are removed. Only local `fail_on` policy determines the quality gate.
 

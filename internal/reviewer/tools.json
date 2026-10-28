@@ -64,8 +64,9 @@
           "type": "object",
           "properties": {
             "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
-            "category": {"type": "string", "enum": ["correctness", "security", "concurrency", "performance", "compatibility", "tests"]},
-            "rule_id": {"type": "string"},
+            "category": {"type": "string", "enum": ["style", "reliability", "maintainability", "performance", "security", "tests", "build"]},
+            "rule_id": {"type": "string", "description": "Optional temporary R-number reference when one supplied rule applies, such as R1."},
+            "rule_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional temporary R-number references when several supplied rules directly support the same finding."},
             "file": {"type": "string"},
             "start_line": {"type": "integer"},
             "end_line": {"type": "integer"},
@@ -86,8 +87,9 @@
             "type": "object",
             "properties": {
               "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
-              "category": {"type": "string", "enum": ["correctness", "security", "concurrency", "performance", "compatibility", "tests"]},
-              "rule_id": {"type": "string"},
+              "category": {"type": "string", "enum": ["style", "reliability", "maintainability", "performance", "security", "tests", "build"]},
+              "rule_id": {"type": "string", "description": "Optional temporary R-number reference when one supplied rule applies, such as R1."},
+              "rule_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional temporary R-number references when several supplied rules directly support the same finding."},
               "file": {"type": "string"},
               "start_line": {"type": "integer"},
               "end_line": {"type": "integer"},

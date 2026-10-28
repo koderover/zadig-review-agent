@@ -342,33 +342,31 @@ func TestCodeCommentCategoryUsesClosedEnum(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	want := "style,reliability,maintainability,performance,security,tests,build"
 	for _, definition := range definitions {
 		if definition.Name != "code_comment" {
 			continue
 		}
-		properties, ok := definition.Parameters["properties"].(map[string]any)
-		if !ok {
-			t.Fatalf("code_comment properties missing: %+v", definition.Parameters)
-		}
-		finding, ok := properties["finding"].(map[string]any)
-		if !ok {
-			t.Fatalf("finding schema missing: %+v", properties)
-		}
-		findingProperties, ok := finding["properties"].(map[string]any)
-		if !ok {
-			t.Fatalf("finding properties missing: %+v", finding)
-		}
-		category, ok := findingProperties["category"].(map[string]any)
-		if !ok {
-			t.Fatalf("category schema missing: %+v", findingProperties)
-		}
-		values, ok := category["enum"].([]any)
-		if !ok || len(values) != 6 {
-			t.Fatalf("category must use the six-value enum: %+v", category)
-		}
-		findings, ok := properties["findings"].(map[string]any)
-		if !ok || findings["minItems"] != float64(1) || findings["maxItems"] != float64(10) {
+		properties := definition.Parameters["properties"].(map[string]any)
+		finding := properties["finding"].(map[string]any)
+		findings := properties["findings"].(map[string]any)
+		if findings["minItems"] != float64(1) || findings["maxItems"] != float64(10) {
 			t.Fatalf("code_comment findings must support bounded batching: %+v", findings)
+		}
+		for _, schema := range []map[string]any{finding, findings["items"].(map[string]any)} {
+			category := schema["properties"].(map[string]any)["category"].(map[string]any)
+			values := category["enum"].([]any)
+			var ids []string
+			for _, value := range values {
+				id := value.(string)
+				if !validCategory(id) || !strings.Contains(systemPrompt("en-US"), "- "+id+":") {
+					t.Fatalf("category missing from validation or prompt: %s", id)
+				}
+				ids = append(ids, id)
+			}
+			if strings.Join(ids, ",") != want {
+				t.Fatalf("category enum differs from the seven categories: %v", ids)
+			}
 		}
 		return
 	}

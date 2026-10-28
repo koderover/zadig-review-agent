@@ -13,7 +13,7 @@
 
 当前版本不会修改仓库、执行任意 Shell、访问外部 MCP、加载 Skill，也不会向 GitHub、GitLab 或 Gitee 回写评论。
 
-审查关注正确性、安全、并发、资源管理、性能、兼容性和关键测试缺失。纯格式、命名偏好和没有实际风险的风格问题默认不报告。
+审查问题分为代码规范、正确性与可靠性、可维护性、性能效率、安全风险、测试质量、构建与交付七类。规范问题须违反明确规则，可维护性与测试问题须有具体成本或风险证据，纯偏好建议不报告。
 
 ## 2. 总体架构
 
@@ -107,7 +107,7 @@ review:
   max_tool_rounds: 30
   max_context_tool_calls: 10
   context_convergence_ratio: 0.5
-  max_chunk_tokens: 20000
+  max_chunk_tokens: 30000
   max_tokens_budget: 0
   confidence_threshold: 0.75
   fail_on:
@@ -119,7 +119,7 @@ model:
   name: configured-model
   endpoint: https://api.openai.com/v1
   api_key: sk-...
-  timeout: 8m
+  timeout: 10m
 
 output:
   json: review-report.json
@@ -141,7 +141,7 @@ output:
 export ZADIG_REVIEW_MODEL_PROTOCOL=openai
 export ZADIG_REVIEW_MODEL_NAME=gpt-4o
 export ZADIG_REVIEW_MODEL_ENDPOINT=https://api.openai.com/v1
-export ZADIG_REVIEW_MODEL_TIMEOUT=8m
+export ZADIG_REVIEW_MODEL_TIMEOUT=10m
 export ZADIG_REVIEW_MODEL_API_KEY=...
 ```
 
@@ -158,7 +158,7 @@ Rules 是普通声明式数据，不具备执行能力。加载层级按优先�
 3. `~/.zadig-review/rules.json`；
 4. 嵌入式 `internal/rules/system_rules.json`。
 
-指定 `--rule` 不会阻止 project、global 和 system 层加载。每层按声明顺序匹配，第一条命中的规则生效；当前层没有命中时继续下一层。
+指定 `--rule` 不会阻止 project、global 和 system 层加载。在最高优先级且有命中的自定义规则层中，按声明顺序收集所有匹配规则；该层没有命中时继续下一层。内置层仍只取第一条匹配规则。
 
 ```json
 {
@@ -166,9 +166,15 @@ Rules 是普通声明式数据，不具备执行能力。加载层级按优先�
   "exclude": ["**/vendor/**", "**/generated/**"],
   "rules": [
     {
+      "name": "Go 审查",
       "path": "**/*.go",
       "rule": ".zadig-review/docs/go-review.md",
       "merge_system_rule": true
+    },
+    {
+      "name": "Go 格式规范",
+      "path": "**/*.go",
+      "rule": "检查变更代码是否符合 gofmt 格式。"
     }
   ]
 }
@@ -183,9 +189,9 @@ Glob 匹配大小写不敏感，支持 `**`、`?`、字符类和 `{a,b}` 展开�
 - global 引用相对 `~/.zadig-review/` 解析；
 - 引用上限 512 KiB；
 - 拒绝路径逃逸和解析后扩展名不受支持的符号链接；
-- 引用失败记录非阻断 warning，并继续向下一规则层 fallback。
+- 引用失败记录非阻断 warning，跳过该条目；若当前层仍有其他匹配规则则继续使用，否则向下一层 fallback。
 
-`merge_system_rule: true` 将匹配的系统规则和用户规则合并。过滤配置取最高优先级且实际包含 include/exclude 的规则层，不跨层合并。
+`name` 可省略，未命名规则以来源和条目序号显示；同一规则文件中的显式名称不得重复。每条内置规则也有名称。`merge_system_rule: true` 将匹配的系统规则作为独立命名规则加入一次。审查时用临时 `R1`、`R2` 等编号给模型标记归属；一个问题可关联多条规则。同一问题的重复 finding 会合并规则列表。编号缺失或无效时保留 finding，但不标记该编号的规则归属。过滤配置取最高优先级且实际包含 include/exclude 的规则层，不跨层合并。
 
 ## 6. 文件过滤
 
@@ -286,8 +292,8 @@ Commit/Range 模式的 `file_read` 从被审查 ref 读取，Workspace 模式读
 ```json
 {
   "severity": "high",
-  "category": "correctness",
-  "rule_id": "optional-rule-id",
+  "category": "reliability",
+  "rule_id": "R1",
   "file": "internal/order/service.go",
   "start_line": 82,
   "end_line": 87,
@@ -300,9 +306,9 @@ Commit/Range 模式的 `file_read` 从被审查 ref 读取，Workspace 模式读
 }
 ```
 
-`severity` 和 `category` 在最终验证前统一转为小写。工具 schema 将 category 限制为 `correctness`、`security`、`concurrency`、`performance`、`compatibility` 和 `tests`；对少数常见兼容值做确定性归一化，例如 `Error Handling`、`reliability` 映射为 `correctness`，`test coverage` 映射为 `tests`。未知类别仍会被丢弃。
+`severity` 和 `category` 在最终验证前统一转为小写。工具 schema 将 category 限制为 `style`、`reliability`、`maintainability`、`performance`、`security`、`tests`、`build`。每条 finding 按缺陷及其直接影响选择一个主要类别，不根据文件、规则名称或章节分类。代码规范问题必须违反内置或自定义规则中的明确约定；可维护性问题必须有具体成本或风险证据。旧值 `correctness`、`concurrency`、`compatibility`、`Error Handling`、`resource management` 归一化为 `reliability`，保留测试和格式别名；未知类别仍被丢弃。程序在生成 fingerprint 前填充中文 `category_name`，覆盖模型提供的名称。控制台使用中文分类及英文严重程度（critical/high/medium/low），包括严重程度统计。Markdown 使用中文分类及严重程度标签（严重、高、中、低），且不受正文语言设置影响；JSON ID 和质量门禁使用英文。历史报告不重写，类别归一化变化可能改变 fingerprint。示例中的 `R1` 是当次审查的临时编号；多个规则可通过 `rule_ids` 数组提交。最终报告的 `matched_rules` 列出全部已验证的规则；兼容字段 `rule_id`、`rule_name` 指向列表中的第一条。
 
-Review Filter 完成后，如果输出语言不是 English，Reviewer 使用独立的无工具 Localization Prompt 批量本地化 `title`、`problem`、`evidence` 和 `suggestion`；当所有人类可读字段已经使用请求的中文文字时跳过这次重复请求。该阶段只能按候选 ID 改写人类可读字段，不能修改文件、行号、severity、category、confidence 或 finding 数量。Filter 和 Localization 接受裸数组及有限的常见包装对象；响应非法时追加严格格式提示重试一次。`finish_reason=length` 会被明确报告为输出截断，截断内容不会回放到重试上下文。重试后仍失败则保留原 finding、记录 warning，并将审查标记为不完整。
+完成定位后，先校验 finding 并生成 fingerprint，再交给 Review Filter。过滤器会分别看到同指纹候选的证据，只能删除被 diff 直接证伪的候选。随后合并幸存的重复问题，仅保留同指纹幸存候选的规则归属。在输出语言不是 English 时，再使用独立的无工具 Localization Prompt 批量本地化 `title`、`problem`、`evidence` 和 `suggestion`；当所有人类可读字段已经使用请求的中文文字时跳过这次重复请求。Fingerprint 保留原始措辞，避免相同问题因译文不同而无法去重。本地化只能按候选 ID 改写人类可读字段，不能修改文件、行号、severity、category、confidence 或 finding 数量。Filter 和 Localization 接受裸数组及有限的常见包装对象；响应非法时追加严格格式提示重试一次。`finish_reason=length` 会被明确报告为输出截断，截断内容不会回放到重试上下文。重试后仍失败则保留原 finding、记录 warning，并将审查标记为不完整。
 
 处理顺序：
 
@@ -310,11 +316,12 @@ Review Filter 完成后，如果输出语言不是 English，Reviewer 使用独�
 2. 非空 `existing_code` 无法匹配当前 diff 时，不再相信碰巧与 changed line 重叠的行号；若该片段明确存在于其他 changed file，直接丢弃且不调用 Relocation；
 3. 仅当 `existing_code` 为空时，已有行号与 changed line 重叠才直接接受位置；
 4. 无法定位时调用 Relocation，返回新的精确 `existing_code`；响应 JSON 非法时追加一次严格格式修复请求，JSON 合法但片段仍无法定位时只丢弃该候选；
-5. 为候选分配 `c-0`、`c-1` 等稳定临时 ID；
-6. Review Filter 只返回需要删除的 ID；
-7. Filter 只有在 diff 提供直接反证时才应删除，不能改写 finding；
-8. Filter 超时或响应非法时保留原 findings、记录 warning，并将审查标记为不完整；
-9. 最终再次校验 changed line、严重程度、置信度和路径，然后生成 fingerprint、去重并聚合。
+5. 校验 changed line、严重程度、置信度、路径和规则编号，并为每条候选生成 fingerprint；
+6. 为候选分配 `c-0`、`c-1` 等稳定临时 ID，由 Review Filter 分别检查每条证据；
+7. Filter 只返回被 diff 直接证伪的候选 ID；超时或响应非法时保留原 findings、记录 warning，并将审查标记为不完整；
+8. 按 fingerprint 合并幸存候选，保留这些候选的规则归属，正文采用最高严重程度幸存候选的证据、建议和置信度；
+9. 本地化展示文字，最后再次检查位置；
+10. 按原始 fingerprint 跨文件分块去重。
 
 允许的 severity 为 `critical`、`high`、`medium`、`low`。低于 `confidence_threshold` 的 finding 被丢弃。质量门禁只由本地 `fail_on` 策略决定。
 

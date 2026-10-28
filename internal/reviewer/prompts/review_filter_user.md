@@ -1,7 +1,7 @@
 File: {{current_file_path}}
-<system_rule>
+<review_rules>
 {{system_rule}}
-</system_rule>
+</review_rules>
 <candidates>
 {{comments}}
 </candidates>

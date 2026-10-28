@@ -10,7 +10,7 @@
 
 ## 功能简介
 
-Zadig Review Agent 读取 Git 变更，使用用户配置的大语言模型识别具体缺陷，将每条问题与真实 diff 进行校验，并生成控制台、JSON 和 Markdown 报告。审查重点包括正确性、安全、并发、资源管理、性能、兼容性和关键测试缺失。
+Zadig Review Agent 读取 Git 变更，使用用户配置的大语言模型识别具体缺陷，将每条问题与真实 diff 进行校验，并生成控制台、JSON 和 Markdown 报告。审查问题分为代码规范、正确性与可靠性、可维护性、性能效率、安全风险、测试质量、构建与交付七类。
 
 主要特性：
 
@@ -138,11 +138,42 @@ zadig-review-agent review --debug-file "$PWD/llm-debug.jsonl"
 3. `~/.zadig-review/rules.json`
 4. 内置系统规则
 
-参考 [.zadig-review/rules.example.json](.zadig-review/rules.example.json) 和 [.zadig-review/docs/go-review.md](.zadig-review/docs/go-review.md)。可检查单个路径最终使用的规则：
+每条规则可设置可选的 `name`；同一路径可以命中当前最高优先级规则文件中的多条规则。同一问题若由多条规则指出，结果合并为一条 finding 并列出所有相关规则；无法归属的问题仍会保留。内置规则也都有名称。参考 [.zadig-review/rules.example.json](.zadig-review/rules.example.json) 和 [.zadig-review/docs/go-review.md](.zadig-review/docs/go-review.md)。可检查单个路径最终使用的所有规则：
 
 ```bash
 zadig-review-agent rules check internal/reviewer/reviewer.go
 ```
+
+## 问题分类与结果展示
+
+每条 finding 选择一个主要类别，并可关联多条规则来源。分类按具体缺陷及其直接影响判断，不由文件类型、规则名称或章节决定；有多种影响时选择证据最直接、最能解释修复必要性的一类。
+
+| JSON `category` | 中文名称 |
+|---|---|
+| `style` | 代码规范 |
+| `reliability` | 正确性与可靠性 |
+| `maintainability` | 可维护性 |
+| `performance` | 性能效率 |
+| `security` | 安全风险 |
+| `tests` | 测试质量 |
+| `build` | 构建与交付 |
+
+明确的格式、命名和编码约定违反归代码规范；有证据的修改困难归可维护性。资源泄漏导致耗尽归正确性与可靠性，多余分配归性能效率。CI 执行不可信代码归安全风险，缺失工具依赖归构建与交付。测试质量检查须有具体回归风险或明确规则要求，不能仅因没有测试就报告问题。
+
+JSON 保留英文 `category`，追加程序生成的 `category_name`；`severity` 和 `stats.by_severity` 继续使用英文值。控制台使用中文分类和英文严重程度（`critical/high/medium/low`）；Markdown 的分类和严重程度固定以中文展示，不受正文语言设置影响：`critical` → 严重，`high` → 高，`medium` → 中，`low` → 低。
+
+JSON 的 `stats.additions`、`stats.deletions` 和 `stats.changed_lines` 分别为新增、删除及两者合计的行数，零值也输出。替换一行计为删除一行加新增一行，即两行变更。统计覆盖全部变更文件，包括被审查过滤的文件和敏感文件；仅收集行数，不输出敏感内容。二进制文件不计行数，纯重命名计零。Range 模式统计 merge-base 到目标提交，commit 模式统计指定提交，workspace 模式包含未跟踪文件。`stats.changed_files` 仍仅统计通过审查过滤的文件。正式审查与 preview 使用相同口径；统计失败会报错或标记审查不完整，不能将其零值视为没有变更。
+
+```json
+{"category":"reliability","category_name":"正确性与可靠性","severity":"high","title":"错误分支可能导致空指针访问"}
+```
+
+```text
+[正确性与可靠性 · 高] 错误分支可能导致空指针访问
+Rule: Go 综合审查 (project:1)
+```
+
+旧模型输出中的 `correctness`、`concurrency`、`compatibility` 统一归一化为 `reliability`。历史报告不重写，依赖旧类别值的下游需调整；类别参与 fingerprint，因此相关 fingerprint 可能改变。分类在生成 finding 的同次模型调用中完成，不增加模型调用或分类配置。
 
 ## CI 用法
 

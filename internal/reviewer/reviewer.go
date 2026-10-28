@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,6 +42,7 @@ type Runner struct {
 type GitClient interface {
 	Head(context.Context) (string, error)
 	Diff(context.Context, gitdiff.Request) ([]gitdiff.FileDiff, error)
+	DiffStats(context.Context, gitdiff.Request) (gitdiff.Stats, error)
 }
 
 func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
@@ -68,6 +70,10 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 	if err != nil {
 		return incomplete(r, head, err), nil
 	}
+	lineStats, err := r.Git.DiffStats(ctx, r.DiffRequest)
+	if err != nil {
+		return incomplete(r, head, fmt.Errorf("git diff stats: %w", err)), nil
+	}
 	var blocked map[string]bool
 	if client, ok := r.Git.(interface {
 		BlockedContextPaths(context.Context, gitdiff.Request) (map[string]bool, error)
@@ -79,7 +85,7 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 	}
 	filtered := filter.Apply(files, filter.Options{RuleFile: r.RuleResolver.FilterFile})
 	filtered = filter.ExcludeBlockedPaths(filtered, blocked)
-	chunks := fileChunks(filtered.Kept, r.Config.Review.MaxChunkTokens)
+	chunks := fileChunks(filtered.Kept, r.Config.Review.MaxChunkTokens, r.RuleResolver)
 	r.showFileLabel = len(chunks) > 1
 
 	report = agent.Report{
@@ -97,6 +103,9 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 		},
 		Stats: agent.Stats{
 			ChangedFiles: len(filtered.Kept),
+			Additions:    lineStats.Additions,
+			Deletions:    lineStats.Deletions,
+			ChangedLines: lineStats.Additions + lineStats.Deletions,
 			Chunks:       len(chunks),
 			BySeverity:   map[string]int{},
 		},
@@ -136,35 +145,40 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 					budgetCommitted.Add(usage.TotalTokens - job.estimatedTokens)
 				}
 				r.trace("%scompleted: %d finding(s) (%s)", r.progressFilePrefix(job.file.Path), len(findings), time.Since(started).Round(time.Millisecond))
-				results <- chunkResult{findings: findings, rule: job.ruleMeta, usage: usage, warnings: warnings, err: err}
+				results <- chunkResult{findings: findings, rules: job.ruleMeta, usage: usage, warnings: warnings, err: err}
 			}
 		}()
 	}
 	go func() {
 	loop:
 		for index, chunk := range chunks {
-			resolved := r.RuleResolver.Resolve(chunk.Path)
-			ruleMeta := agent.ResolvedRule{
-				File:       chunk.Path,
-				Source:     resolved.Source,
-				SourcePath: resolved.SourcePath,
-				Pattern:    resolved.Pattern,
-				Digest:     resolved.Digest,
+			resolved := r.RuleResolver.ResolveAll(chunk.Path)
+			ruleMeta := make([]agent.ResolvedRule, 0, len(resolved))
+			for _, rule := range resolved {
+				ruleMeta = append(ruleMeta, agent.ResolvedRule{
+					File:       chunk.Path,
+					ID:         rule.ID,
+					Name:       rule.Name,
+					Source:     rule.Source,
+					SourcePath: rule.SourcePath,
+					Pattern:    rule.Pattern,
+					Digest:     rule.Digest,
+				})
 			}
 			if budget := r.Config.Review.MaxTokensBudget; budget > 0 {
-				nextEstimate := estimateReviewChunkTokens(chunk)
+				nextEstimate := estimateReviewChunkTokens(chunk, resolved...)
 				committed := budgetCommitted.Load()
 				if committed+nextEstimate > budget {
 					warning := fmt.Sprintf("token_budget_reached: %s: committed %d + next chunk estimate %d exceeds budget %d; skipped this and remaining chunks", chunk.Path, committed, nextEstimate, budget)
 					r.trace("Token budget reached before %s (%d committed + %d estimated > %d); stopping dispatch", chunk.Path, committed, nextEstimate, budget)
-					results <- chunkResult{rule: ruleMeta, warnings: []string{warning}}
+					results <- chunkResult{rules: ruleMeta, warnings: []string{warning}}
 					break loop
 				}
 				budgetCommitted.Add(nextEstimate)
 			}
 			select {
 			case <-ctx.Done():
-				if estimate := estimateReviewChunkTokensIfBudgeted(r.Config.Review.MaxTokensBudget, chunk); estimate > 0 {
+				if estimate := estimateReviewChunkTokensIfBudgeted(r.Config.Review.MaxTokensBudget, chunk, resolved...); estimate > 0 {
 					budgetCommitted.Add(-estimate)
 				}
 				break loop
@@ -174,7 +188,7 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 				total:           len(chunks),
 				rule:            resolved,
 				ruleMeta:        ruleMeta,
-				estimatedTokens: estimateReviewChunkTokensIfBudgeted(r.Config.Review.MaxTokensBudget, chunk),
+				estimatedTokens: estimateReviewChunkTokensIfBudgeted(r.Config.Review.MaxTokensBudget, chunk, resolved...),
 			}:
 			}
 		}
@@ -192,9 +206,7 @@ func (r Runner) Run(ctx context.Context) (report agent.Report, runErr error) {
 				report.Incomplete = true
 			}
 		}
-		if result.rule.File != "" {
-			report.ResolvedRules = append(report.ResolvedRules, result.rule)
-		}
+		report.ResolvedRules = append(report.ResolvedRules, result.rules...)
 		if result.err != nil {
 			report.Incomplete = true
 			report.Errors = append(report.Errors, result.err.Error())
@@ -269,30 +281,30 @@ func warningMakesIncomplete(warning string) bool {
 		strings.HasPrefix(warning, "relocation_invalid_response:")
 }
 
-func estimateReviewChunkTokens(file gitdiff.FileDiff) int64 {
+func estimateReviewChunkTokens(file gitdiff.FileDiff, matched ...rules.ResolvedRule) int64 {
 	const (
 		promptOverheadTokens     = 2000
 		averageMainRounds        = 7
 		averageOutputTokensRound = 700
 	)
-	diffTokens := estimateTokens(renderFileDiff(file))
-	total := int64((diffTokens+promptOverheadTokens)*averageMainRounds + averageOutputTokensRound*averageMainRounds)
+	inputTokens := estimateTokens(renderFileDiff(file)) + estimateTokens(renderReviewRules(matched))
+	total := int64((inputTokens+promptOverheadTokens)*averageMainRounds + averageOutputTokensRound*averageMainRounds)
 	if file.Insertions+file.Deletions >= planLineThreshold {
-		total += int64(diffTokens + promptOverheadTokens + 400)
+		total += int64(inputTokens + promptOverheadTokens + 400)
 	}
 	return total
 }
 
-func estimateReviewChunkTokensIfBudgeted(budget int64, file gitdiff.FileDiff) int64 {
+func estimateReviewChunkTokensIfBudgeted(budget int64, file gitdiff.FileDiff, matched ...rules.ResolvedRule) int64 {
 	if budget <= 0 {
 		return 0
 	}
-	return estimateReviewChunkTokens(file)
+	return estimateReviewChunkTokens(file, matched...)
 }
 
 type chunkResult struct {
 	findings []agent.Finding
-	rule     agent.ResolvedRule
+	rules    []agent.ResolvedRule
 	usage    agent.TokenUsage
 	warnings []string
 	err      error
@@ -318,22 +330,28 @@ type reviewJob struct {
 	file            gitdiff.FileDiff
 	index           int
 	total           int
-	rule            rules.ResolvedRule
-	ruleMeta        agent.ResolvedRule
+	rule            []rules.ResolvedRule
+	ruleMeta        []agent.ResolvedRule
 	estimatedTokens int64
 }
 
-func (r Runner) reviewFile(ctx context.Context, file gitdiff.FileDiff, rule rules.ResolvedRule, allFiles []gitdiff.FileDiff) ([]agent.Finding, agent.TokenUsage, []string, error) {
-	return r.runSubtask(ctx, file, rule, allFiles)
+func (r Runner) reviewFile(ctx context.Context, file gitdiff.FileDiff, matched []rules.ResolvedRule, allFiles []gitdiff.FileDiff) ([]agent.Finding, agent.TokenUsage, []string, error) {
+	return r.runSubtask(ctx, file, matched, allFiles)
 }
 
-func fileChunks(files []gitdiff.FileDiff, maxTokens int) []gitdiff.FileDiff {
+func fileChunks(files []gitdiff.FileDiff, maxTokens int, resolver rules.Resolver) []gitdiff.FileDiff {
 	if maxTokens < 1000 {
 		maxTokens = config.Default().Review.MaxChunkTokens
 	}
-	target := maxTokens * 7 / 10
+	limit := maxTokens * 4 / 5
 	var chunks []gitdiff.FileDiff
 	for _, file := range files {
+		ruleTokens := estimateTokens(renderReviewRules(resolver.ResolveAll(file.Path)))
+		target := min(maxTokens*7/10, limit-ruleTokens)
+		if target <= 0 {
+			chunks = append(chunks, file)
+			continue
+		}
 		if estimateTokens(renderFileDiff(file)) <= target || len(file.Hunks) == 0 {
 			chunks = append(chunks, file)
 			continue
@@ -343,11 +361,27 @@ func fileChunks(files []gitdiff.FileDiff, maxTokens int) []gitdiff.FileDiff {
 				chunk := file
 				chunk.Hunks = []gitdiff.Hunk{part}
 				chunk.Insertions, chunk.Deletions = countChanges(part.Lines)
-				chunks = append(chunks, chunk)
+				chunks = append(chunks, splitChunkToFit(chunk, ruleTokens, limit)...)
 			}
 		}
 	}
 	return chunks
+}
+
+func splitChunkToFit(chunk gitdiff.FileDiff, ruleTokens, limit int) []gitdiff.FileDiff {
+	if ruleTokens+estimateTokens(renderFileDiff(chunk)) <= limit || len(chunk.Hunks) != 1 || len(chunk.Hunks[0].Lines) <= 1 {
+		return []gitdiff.FileDiff{chunk}
+	}
+	lines := chunk.Hunks[0].Lines
+	middle := len(lines) / 2
+	var result []gitdiff.FileDiff
+	for _, part := range [][]gitdiff.Line{lines[:middle], lines[middle:]} {
+		piece := chunk
+		piece.Hunks = []gitdiff.Hunk{buildHunk(part)}
+		piece.Insertions, piece.Deletions = countChanges(part)
+		result = append(result, splitChunkToFit(piece, ruleTokens, limit)...)
+	}
+	return result
 }
 
 func splitHunk(hunk gitdiff.Hunk, targetTokens int) []gitdiff.Hunk {
@@ -446,7 +480,7 @@ func parseFindings(text string) ([]agent.Finding, error) {
 	return direct, nil
 }
 
-func validateFindings(candidates []agent.Finding, file gitdiff.FileDiff, rule rules.ResolvedRule, threshold float64) ([]agent.Finding, error) {
+func validateFindings(candidates []agent.Finding, file gitdiff.FileDiff, matched []rules.ResolvedRule, threshold float64) ([]agent.Finding, error) {
 	var out []agent.Finding
 	for _, finding := range candidates {
 		finding.File = strings.TrimSpace(finding.File)
@@ -458,6 +492,7 @@ func validateFindings(candidates []agent.Finding, file gitdiff.FileDiff, rule ru
 		if !validSeverity(finding.Severity) || !validCategory(finding.Category) {
 			continue
 		}
+		finding.CategoryName = agent.CategoryName(finding.Category)
 		if finding.Confidence < threshold {
 			continue
 		}
@@ -467,9 +502,23 @@ func validateFindings(candidates []agent.Finding, file gitdiff.FileDiff, rule ru
 		if !overlapsChangedLine(file, finding.StartLine, finding.EndLine) {
 			continue
 		}
-		if finding.RuleID == "" {
-			finding.RuleID = rule.Source + ":" + rule.Pattern
+		refs := append([]string{finding.RuleID}, finding.RuleIDs...)
+		finding.RuleID = ""
+		finding.RuleIDs = nil
+		finding.RuleName = ""
+		finding.MatchedRules = nil
+		seenRules := make(map[string]bool, len(refs))
+		for _, ref := range refs {
+			ref = strings.TrimSpace(ref)
+			for index, rule := range matched {
+				if ref == fmt.Sprintf("R%d", index+1) && !seenRules[rule.ID] {
+					finding.MatchedRules = append(finding.MatchedRules, agent.FindingRule{ID: rule.ID, Name: rule.Name})
+					seenRules[rule.ID] = true
+					break
+				}
+			}
 		}
+		sortFindingRules(&finding)
 		finding.Fingerprint = fingerprint(finding)
 		out = append(out, finding)
 	}
@@ -481,18 +530,16 @@ func normalizeCategory(category string) string {
 	normalized = strings.NewReplacer("-", " ", "_", " ").Replace(normalized)
 	normalized = strings.Join(strings.Fields(normalized), " ")
 	switch normalized {
-	case "bug", "correctness", "error handling", "reliability", "resource management":
-		return "correctness"
+	case "bug", "correctness", "error handling", "reliability", "resource management", "concurrency", "compatibility":
+		return "reliability"
 	case "security":
 		return "security"
-	case "concurrency":
-		return "concurrency"
 	case "performance":
 		return "performance"
-	case "compatibility":
-		return "compatibility"
 	case "test", "testing", "tests", "test coverage":
 		return "tests"
+	case "style", "formatting", "naming":
+		return "style"
 	default:
 		return normalized
 	}
@@ -519,22 +566,36 @@ func validSeverity(severity string) bool {
 }
 
 func validCategory(category string) bool {
-	switch category {
-	case "correctness", "security", "concurrency", "performance", "compatibility", "tests":
-		return true
-	default:
-		return false
-	}
+	return agent.CategoryName(category) != ""
 }
 
 func aggregate(findings []agent.Finding) []agent.Finding {
-	seen := map[string]bool{}
+	seen := map[string]int{}
 	var out []agent.Finding
 	for _, finding := range findings {
-		if seen[finding.Fingerprint] {
+		if index, ok := seen[finding.Fingerprint]; ok {
+			merged := &out[index]
+			combinedRules := append([]agent.FindingRule(nil), merged.MatchedRules...)
+			for _, rule := range finding.MatchedRules {
+				found := false
+				for _, existing := range combinedRules {
+					if existing.ID == rule.ID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					combinedRules = append(combinedRules, rule)
+				}
+			}
+			if severityRank(finding.Severity) > severityRank(merged.Severity) {
+				*merged = finding
+			}
+			merged.MatchedRules = combinedRules
+			sortFindingRules(merged)
 			continue
 		}
-		seen[finding.Fingerprint] = true
+		seen[finding.Fingerprint] = len(out)
 		out = append(out, finding)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -544,6 +605,42 @@ func aggregate(findings []agent.Finding) []agent.Finding {
 		return out[i].StartLine < out[j].StartLine
 	})
 	return out
+}
+
+func severityRank(severity string) int {
+	switch severity {
+	case "critical":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func sortFindingRules(finding *agent.Finding) {
+	sort.Slice(finding.MatchedRules, func(i, j int) bool {
+		leftSource, leftNumber := ruleOrder(finding.MatchedRules[i].ID)
+		rightSource, rightNumber := ruleOrder(finding.MatchedRules[j].ID)
+		if leftSource != rightSource {
+			return leftSource < rightSource
+		}
+		return leftNumber < rightNumber
+	})
+	if len(finding.MatchedRules) > 0 {
+		finding.RuleID = finding.MatchedRules[0].ID
+		finding.RuleName = finding.MatchedRules[0].Name
+	}
+}
+
+func ruleOrder(id string) (string, int) {
+	source, number, _ := strings.Cut(id, ":")
+	order, _ := strconv.Atoi(number)
+	return source, order
 }
 
 func fingerprint(f agent.Finding) string {

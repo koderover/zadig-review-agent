@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,9 +14,63 @@ import (
 	"github.com/koderover/zadig-review-agent/internal/agent"
 	"github.com/koderover/zadig-review-agent/internal/config"
 	"github.com/koderover/zadig-review-agent/internal/gitdiff"
+	"github.com/koderover/zadig-review-agent/internal/reviewer"
 	"github.com/koderover/zadig-review-agent/internal/rules"
 	"github.com/koderover/zadig-review-agent/internal/version"
 )
+
+func TestPreviewAndReviewCountAllFiles(t *testing.T) {
+	root := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	write := func(path, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(root, path), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runGit("init")
+	runGit("config", "user.email", "test@example.com")
+	runGit("config", "user.name", "Test")
+	runGit("config", "commit.gpgsign", "false")
+	write("main_test.go", "old\n")
+	write("deleted.go", "delete\nme\n")
+	write(".env", "SECRET_MARKER\n")
+	runGit("add", ".")
+	runGit("commit", "-m", "base")
+	write("main_test.go", "new\nextra\n")
+	write(".env", "SECRET_MARKER\nNEW_SECRET_MARKER\n")
+	if err := os.Remove(filepath.Join(root, "deleted.go")); err != nil {
+		t.Fatal(err)
+	}
+	req := gitdiff.Request{Mode: gitdiff.ModeWorkspace}
+	preview, err := previewReport(context.Background(), config.Default(), rules.Resolver{}, req, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := (reviewer.Runner{Root: root, Config: config.Default(), Git: gitdiff.Client{Dir: root}, DiffRequest: req}).Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, got := range []agent.Report{preview, report} {
+		if got.Incomplete || got.Stats.ChangedFiles != 0 || got.Stats.Additions != 3 || got.Stats.Deletions != 3 || got.Stats.ChangedLines != 6 {
+			t.Fatalf("unexpected all-file counts: %+v", got)
+		}
+		data, err := json.Marshal(got)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "SECRET_MARKER") {
+			t.Fatalf("secret leaked into report: %s", data)
+		}
+	}
+}
 
 func TestVersion(t *testing.T) {
 	oldVersion, oldCommit, oldDate := version.Version, version.Commit, version.Date
@@ -76,7 +131,7 @@ func TestCommandHelpExitsSuccessfully(t *testing.T) {
 func TestRulesCheck(t *testing.T) {
 	dir := t.TempDir()
 	rulePath := filepath.Join(dir, "rules.json")
-	if err := os.WriteFile(rulePath, []byte(`{"rules":[{"path":"src/**/*.go","rule":"custom go rule"}]}`), 0o600); err != nil {
+	if err := os.WriteFile(rulePath, []byte(`{"rules":[{"name":"Go security","path":"src/**/*.go","rule":"custom go rule"},{"name":"Go style","path":"src/**/*.go","rule":"style rule"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var stdout, stderr bytes.Buffer
@@ -85,7 +140,7 @@ func TestRulesCheck(t *testing.T) {
 		t.Fatalf("code=%d err=%v stderr=%s", code, err, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "Source: Custom (--rule)") || !strings.Contains(out, "Pattern: src/**/*.go") || !strings.Contains(out, "custom go rule") {
+	if !strings.Contains(out, "Source: Custom (--rule)") || !strings.Contains(out, "Pattern: src/**/*.go") || !strings.Contains(out, "custom go rule") || !strings.Contains(out, "Rule 1: Go security (custom:1)") || !strings.Contains(out, "Rule 2: Go style (custom:2)") {
 		t.Fatalf("unexpected rules check output:\n%s", out)
 	}
 }
@@ -118,7 +173,7 @@ func TestReviewPreviewDoesNotNeedModel(t *testing.T) {
 	git(t, "add", "main.go")
 	git(t, "commit", "-m", "change")
 	rulePath := filepath.Join(dir, "rules.json")
-	if err := os.WriteFile(rulePath, []byte(`{"rules":[{"path":"**/*.go","rule":"preview go rule"}]}`), 0o600); err != nil {
+	if err := os.WriteFile(rulePath, []byte(`{"rules":[{"name":"Preview Go","path":"**/*.go","rule":"preview go rule"},{"name":"Preview style","path":"**/*.go","rule":"style checks"}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir("nested", 0o700); err != nil {
@@ -138,6 +193,9 @@ func TestReviewPreviewDoesNotNeedModel(t *testing.T) {
 	}
 	if strings.Contains(stdout.String(), "Code review:") || !strings.Contains(stdout.String(), "Review result: findings=0 status=complete") {
 		t.Fatalf("unexpected preview result output:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "main.go: Preview Go (custom:1)") || !strings.Contains(stdout.String(), "main.go: Preview style (custom:2)") {
+		t.Fatalf("preview console omitted named rules:\n%s", stdout.String())
 	}
 	if strings.Contains(stdout.String(), "Report dir:") || strings.Contains(stdout.String(), "JSON report:") || strings.Contains(stdout.String(), "Markdown report:") {
 		t.Fatalf("report paths must not be printed to the console:\n%s", stdout.String())
@@ -174,6 +232,14 @@ func TestReviewPreviewDoesNotNeedModel(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"llm_requests": 0`) || !strings.Contains(string(data), `"total_tokens": 0`) {
 		t.Fatalf("expected preview report to contain zero usage:\n%s", data)
+	}
+	for _, field := range []string{`"additions": 1`, `"deletions": 0`, `"changed_lines": 1`} {
+		if !strings.Contains(string(data), field) {
+			t.Fatalf("preview JSON missing %s:\n%s", field, data)
+		}
+	}
+	if !strings.Contains(string(data), `"name": "Preview Go"`) || !strings.Contains(string(data), `"name": "Preview style"`) {
+		t.Fatalf("preview did not include both named rules:\n%s", data)
 	}
 }
 

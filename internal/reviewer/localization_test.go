@@ -17,7 +17,7 @@ func TestLocalizeFindingsTranslatesOnlyHumanReadableFields(t *testing.T) {
 	}}}
 	r := Runner{Config: config.Default(), LLM: llm}
 	original := []agent.Finding{{
-		Severity: "high", Category: "correctness", File: "main.go", StartLine: 10, EndLine: 10,
+		Severity: "high", Category: "reliability", CategoryName: "正确性与可靠性", File: "main.go", StartLine: 10, EndLine: 10,
 		Title: "Error is discarded", Problem: "The new branch returns nil.", Evidence: "It uses `return nil`.",
 		Suggestion: "Return the original error.", Confidence: 0.9,
 	}}
@@ -29,7 +29,7 @@ func TestLocalizeFindingsTranslatesOnlyHumanReadableFields(t *testing.T) {
 	if localized[0].Title != "错误被静默丢弃" || !strings.Contains(localized[0].Problem, "新增分支") {
 		t.Fatalf("human-readable fields were not localized: %+v", localized[0])
 	}
-	if localized[0].Severity != original[0].Severity || localized[0].File != original[0].File || localized[0].StartLine != original[0].StartLine || localized[0].Confidence != original[0].Confidence {
+	if localized[0].Category != original[0].Category || localized[0].CategoryName != original[0].CategoryName || localized[0].Severity != original[0].Severity || localized[0].File != original[0].File || localized[0].StartLine != original[0].StartLine || localized[0].Confidence != original[0].Confidence {
 		t.Fatalf("localization changed structural finding data: before=%+v after=%+v", original[0], localized[0])
 	}
 	if len(llm.requests) != 1 || !requestContains(llm.requests[0], "Every natural-language sentence must use Chinese") || usage.LLMRequests != 1 || usage.TotalTokens != 130 {

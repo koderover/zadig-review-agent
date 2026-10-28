@@ -4,9 +4,9 @@ File: {{current_file_path}}
 Other changed files:
 {{change_files}}
 
-<system_rule>
+<review_rules>
 {{system_rule}}
-</system_rule>
+</review_rules>
 
 <diff>
 {{diff}}

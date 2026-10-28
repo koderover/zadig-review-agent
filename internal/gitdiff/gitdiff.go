@@ -3,6 +3,7 @@ package gitdiff
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -341,11 +342,19 @@ func quoteDiffPath(prefix, path string) string {
 }
 
 func (c Client) git(ctx context.Context, args ...string) (string, error) {
+	return c.gitOutput(ctx, false, args...)
+}
+
+func (c Client) gitOutput(ctx context.Context, allowDiffExit bool, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = c.Dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	var exitErr *exec.ExitError
+	if allowDiffExit && errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && stderr.Len() == 0 {
+		err = nil
+	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {

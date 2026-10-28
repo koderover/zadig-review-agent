@@ -26,6 +26,47 @@ func TestResolverPriorityAndFirstMatch(t *testing.T) {
 	}
 }
 
+func TestResolveAllNamedRulesKeepsLayerPriority(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	oldHome := userHomeDir
+	userHomeDir = func() string { return home }
+	defer func() { userHomeDir = oldHome }()
+	project := filepath.Join(dir, ".zadig-review", "rules.json")
+	if err := os.MkdirAll(filepath.Dir(project), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(project, []byte(`{"rules":[{"name":"Go security","path":"**/*.go","rule":"security checks"},{"name":"Go style","path":"**/*.go","rule":"style checks"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	global := filepath.Join(home, ".zadig-review", "rules.json")
+	if err := os.MkdirAll(filepath.Dir(global), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(global, []byte(`{"rules":[{"name":"Global Go","path":"**/*.go","rule":"global checks"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewResolver(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resolver.ResolveAll("src/main.go")
+	if len(got) != 2 || got[0].Name != "Go security" || got[0].ID != "project:1" || got[1].Name != "Go style" || got[1].ID != "project:2" {
+		t.Fatalf("expected both project rules only: %+v", got)
+	}
+}
+
+func TestRuleNamesAreUniqueAndUnnamedRulesHaveFallback(t *testing.T) {
+	if _, err := parseRuleFile("rules.json", []byte(`{"rules":[{"name":"same","path":"a","rule":"one"},{"name":"same","path":"b","rule":"two"}]}`)); err == nil || !strings.Contains(err.Error(), "duplicate rule name") {
+		t.Fatalf("expected duplicate name error, got %v", err)
+	}
+	resolver := Resolver{Layers: []Layer{{Source: SourceProject, File: RuleFile{Rules: []RuleEntry{{Path: "**/*.go", Rule: "one"}, {Path: "**/*.go", Rule: "two"}}}}}}
+	got := resolver.ResolveAll("main.go")
+	if len(got) != 2 || got[0].Name != "Project config #1" || got[1].Name != "Project config #2" {
+		t.Fatalf("unexpected unnamed rule labels: %+v", got)
+	}
+}
+
 func TestCustomFallsThroughProjectGlobalAndSystem(t *testing.T) {
 	dir := t.TempDir()
 	home := t.TempDir()
@@ -114,6 +155,11 @@ func TestSystemRuleFileLoadsEmbeddedJSON(t *testing.T) {
 	if len(file.Rules) == 0 {
 		t.Fatal("expected embedded system rules")
 	}
+	for index, entry := range file.Rules {
+		if entry.Name == "" {
+			t.Fatalf("system rule %d has no name", index)
+		}
+	}
 	got := Resolver{Layers: []Layer{{Source: SourceSystem, File: file}}}.Resolve("src/main.java")
 	if got.Source != SourceSystem || got.Pattern != "**/*.java" {
 		t.Fatalf("unexpected system rule: %+v", got)
@@ -123,7 +169,7 @@ func TestSystemRuleFileLoadsEmbeddedJSON(t *testing.T) {
 		t.Fatalf("unexpected Go system rule: %+v", goRule)
 	}
 	fallback := Resolver{Layers: []Layer{{Source: SourceSystem, File: file}}}.Resolve("nested/unknown.xyz")
-	if fallback.Source != SourceSystem || fallback.Pattern != "**" || !strings.Contains(fallback.Rule, "#### Correctness") {
+	if fallback.Source != SourceSystem || fallback.Pattern != "**" || fallback.Name != "General review" || !strings.Contains(fallback.Rule, "#### Correctness") {
 		t.Fatalf("unexpected system fallback: %+v", fallback)
 	}
 }
@@ -134,7 +180,7 @@ func TestMergeSystemRule(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(project), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	data := `{"rules":[{"path":"**/*.java","rule":"project requirement","merge_system_rule":true}]}`
+	data := `{"rules":[{"path":"**/*.java","rule":"project requirement","merge_system_rule":true},{"path":"**/*.java","rule":"second requirement","merge_system_rule":true}]}`
 	if err := os.WriteFile(project, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -142,9 +188,9 @@ func TestMergeSystemRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := resolver.Resolve("src/main.java")
-	if got.Source != SourceProject || got.Pattern != "**/*.java" || !strings.Contains(got.Rule, "## System-Specific Rules") || !strings.Contains(got.Rule, "Logic Error Detection") || !strings.Contains(got.Rule, "project requirement") {
-		t.Fatalf("unexpected merged rule: %+v", got)
+	got := resolver.ResolveAll("src/main.java")
+	if len(got) != 3 || got[0].Source != SourceProject || got[0].Rule != "project requirement" || got[1].Rule != "second requirement" || got[2].Source != SourceSystem || got[2].Name != "Java review" || !strings.Contains(got[2].Rule, "Logic Error Detection") {
+		t.Fatalf("unexpected merged rules: %+v", got)
 	}
 }
 
@@ -165,8 +211,31 @@ func TestEmptyRuleFallsThroughUnlessMergingSystem(t *testing.T) {
 	if got := resolver.Resolve("main.go"); got.Source != SourceSystem {
 		t.Fatalf("empty rule must fall through: %+v", got)
 	}
-	if got := resolver.Resolve("main.java"); got.Source != SourceProject || !strings.Contains(got.Rule, "Logic Error Detection") {
-		t.Fatalf("empty merged rule must retain system rule with project metadata: %+v", got)
+	if got := resolver.ResolveAll("main.java"); len(got) != 1 || got[0].Source != SourceSystem || !strings.Contains(got[0].Rule, "Logic Error Detection") {
+		t.Fatalf("empty merged rule must retain system rule: %+v", got)
+	}
+}
+
+func TestFailedMergedRuleReferenceFallsThroughToProject(t *testing.T) {
+	dir := t.TempDir()
+	project := filepath.Join(dir, ".zadig-review", "rules.json")
+	if err := os.MkdirAll(filepath.Dir(project), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(project, []byte(`{"rules":[{"name":"Project Go","path":"**/*.go","rule":"project checks"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	custom := filepath.Join(dir, "custom.json")
+	if err := os.WriteFile(custom, []byte(`{"rules":[{"name":"Broken Go","path":"**/*.go","rule":"missing.md","merge_system_rule":true}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resolver, err := NewResolver(dir, custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := resolver.ResolveAll("main.go")
+	if len(resolver.Warnings) != 1 || len(got) != 1 || got[0].Source != SourceProject || got[0].Name != "Project Go" {
+		t.Fatalf("failed custom reference must fall through: rules=%+v warnings=%v", got, resolver.Warnings)
 	}
 }
 

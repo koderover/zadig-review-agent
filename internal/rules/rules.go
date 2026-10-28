@@ -32,12 +32,15 @@ type RuleFile struct {
 }
 
 type RuleEntry struct {
+	Name            string `json:"name,omitempty"`
 	Path            string `json:"path"`
 	Rule            string `json:"rule"`
 	MergeSystemRule bool   `json:"merge_system_rule,omitempty"`
 }
 
 type ResolvedRule struct {
+	ID         string
+	Name       string
 	Source     string
 	SourcePath string
 	Pattern    string
@@ -104,21 +107,43 @@ func NewResolver(repoRoot, customPath string) (Resolver, error) {
 }
 
 func (r Resolver) Resolve(path string) ResolvedRule {
+	matched := r.ResolveAll(path)
+	if len(matched) > 0 {
+		return matched[0]
+	}
+	return ResolvedRule{Source: SourceSystem}
+}
+
+// ResolveAll returns every matching rule from the highest-priority matching
+// user layer. Built-in rules retain their first-match behavior.
+func (r Resolver) ResolveAll(path string) []ResolvedRule {
 	for _, layer := range r.Layers {
-		for _, entry := range layer.File.Rules {
+		var matched []ResolvedRule
+		mergeSystem := false
+		for index, entry := range layer.File.Rules {
 			if strings.TrimSpace(entry.Rule) == "" && !entry.MergeSystemRule {
 				continue
 			}
 			if Match(path, entry.Path) {
-				rule := entry.Rule
-				if entry.MergeSystemRule && layer.Source != SourceSystem {
-					rule = mergeRules(r.resolveSystem(path).Rule, rule)
+				if layer.Source == SourceSystem {
+					return []ResolvedRule{resolved(layer, entry, index)}
 				}
-				return resolvedText(layer, entry.Path, rule)
+				if strings.TrimSpace(entry.Rule) != "" {
+					matched = append(matched, resolved(layer, entry, index))
+				}
+				mergeSystem = mergeSystem || entry.MergeSystemRule
 			}
 		}
+		if mergeSystem {
+			if system := r.resolveSystem(path); system.Rule != "" {
+				matched = append(matched, system)
+			}
+		}
+		if len(matched) > 0 {
+			return matched
+		}
 	}
-	return ResolvedRule{Source: SourceSystem}
+	return nil
 }
 
 func (r Resolver) resolveSystem(path string) ResolvedRule {
@@ -126,26 +151,13 @@ func (r Resolver) resolveSystem(path string) ResolvedRule {
 		if layer.Source != SourceSystem {
 			continue
 		}
-		for _, entry := range layer.File.Rules {
+		for index, entry := range layer.File.Rules {
 			if strings.TrimSpace(entry.Rule) != "" && Match(path, entry.Path) {
-				return resolved(layer, entry)
+				return resolved(layer, entry, index)
 			}
 		}
 	}
 	return ResolvedRule{}
-}
-
-func mergeRules(systemRule, userRule string) string {
-	systemRule = strings.TrimSpace(systemRule)
-	userRule = strings.TrimSpace(userRule)
-	if systemRule == "" {
-		return userRule
-	}
-	if userRule == "" {
-		return systemRule
-	}
-	return "## System-Specific Rules (Mandatory)\n\n" + systemRule +
-		"\n\n---\n\n## User-Specific Rules (Mandatory)\n\n" + userRule
 }
 
 func loadOptionalLayer(source, path, ruleBase string) (Layer, bool, []string, error) {
@@ -184,21 +196,47 @@ func parseRuleFile(path string, data []byte) (RuleFile, error) {
 	if err := json.Unmarshal(data, &file); err != nil {
 		return RuleFile{}, fmt.Errorf("load rule file %s: %w", path, err)
 	}
+	names := make(map[string]bool, len(file.Rules))
 	for i, entry := range file.Rules {
 		if strings.TrimSpace(entry.Path) == "" {
 			return RuleFile{}, fmt.Errorf("load rule file %s: rules[%d] requires path", path, i)
+		}
+		name := strings.TrimSpace(entry.Name)
+		if name != "" {
+			if strings.ContainsAny(name, "\r\n") {
+				return RuleFile{}, fmt.Errorf("load rule file %s: rules[%d] name must be one line", path, i)
+			}
+			if names[name] {
+				return RuleFile{}, fmt.Errorf("load rule file %s: duplicate rule name %q", path, name)
+			}
+			names[name] = true
+			file.Rules[i].Name = name
 		}
 	}
 	return file, nil
 }
 
-func resolved(layer Layer, entry RuleEntry) ResolvedRule {
-	return resolvedText(layer, entry.Path, entry.Rule)
+func resolved(layer Layer, entry RuleEntry, index int) ResolvedRule {
+	name := entry.Name
+	if name == "" {
+		name = fmt.Sprintf("%s #%d", layer.Source, index+1)
+	}
+	return resolvedText(layer, entry.Path, entry.Rule, ruleID(layer.Source, index), name)
 }
 
-func resolvedText(layer Layer, pattern, rule string) ResolvedRule {
+func ruleID(source string, index int) string {
+	key := map[string]string{SourceCustom: "custom", SourceProject: "project", SourceGlobal: "global", SourceSystem: "system"}[source]
+	if key == "" {
+		key = strings.ToLower(strings.ReplaceAll(source, " ", "-"))
+	}
+	return fmt.Sprintf("%s:%d", key, index+1)
+}
+
+func resolvedText(layer Layer, pattern, rule, id, name string) ResolvedRule {
 	sum := sha256.Sum256([]byte(rule))
 	return ResolvedRule{
+		ID:         id,
+		Name:       name,
 		Source:     layer.Source,
 		SourcePath: layer.Path,
 		Pattern:    pattern,
@@ -298,6 +336,7 @@ func resolveRuleEntries(entries []RuleEntry, baseDir, sourcePath string) []strin
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf("rule_reference_failed: %s rules[%d] %q: %v", sourcePath, index, entry.Rule, err))
 			entry.Rule = ""
+			entry.MergeSystemRule = false
 			continue
 		}
 		entry.Rule = content
